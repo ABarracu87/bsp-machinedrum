@@ -1,0 +1,18 @@
+# local only, never publish:
+# session notes and third-party reference material
+docs/
+# MD RAM dumps
+md_state_*.txt
+# this unit's BSP settings backups
+bsp_*.json
+# one-off device experiments (they write BSP settings)
+knob_reset_test.py
+tempo_test.py
+reset_stress_*.log
+
+# build and tooling
+.venv/
+__pycache__/
+build/
+*.spec
+.DS_Store

@@ -1,0 +1,44 @@
+name: build
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Self-checks
+        shell: bash
+        run: |
+          python -m pip install -r requirements.txt
+          python surface.py test
+          python panel.py test
+          python mdmm_bsp.py test
+      - name: Build
+        shell: bash
+        run: ./build.sh
+      - name: Zip (macOS)
+        if: runner.os == 'macOS'
+        run: cd build/dist && ditto -c -k --keepParent "BSP Machinedrum.app" "BSP-Machinedrum-macOS.zip"
+      - name: Zip (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path "build/dist/BSP Machinedrum" -DestinationPath "build/dist/BSP-Machinedrum-Windows-experimental.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BSP-Machinedrum-${{ runner.os }}
+          path: build/dist/*.zip
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/dist/*.zip
