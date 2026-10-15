@@ -474,6 +474,13 @@ def run(*args):
 
     def stdin_quit():                   # "q" on stdin = clean stop (the app's Stop button;
         for line in sys.stdin:          # Windows can't deliver SIGTERM to a handler)
+            cmd = line.split()
+            if cmd[:1] == ["bpm"] and len(cmd) == 2:      # the app's tempo box
+                try:
+                    s.bpm = max(30.0, min(300.0, float(cmd[1])))
+                    print(f"tempo {s.bpm:.0f} BPM", flush=True)
+                except ValueError:
+                    pass
             if line.strip() == "q":     # (EOF alone, e.g. nohup's /dev/null, is not a stop)
                 _thread.interrupt_main()    # KeyboardInterrupt: the finally cleans up
                 return
@@ -522,7 +529,7 @@ def run(*args):
             md["playing"] = now - last_clock < 1.0    # + 1 s to settle after STOP
             if now - last_status > 2:              # debug: playhead inputs
                 last_status = now
-                print(f"status running={s.running} clock_age={now - last_clock:.2f} "
+                print(f"status running={s.running} bpm={s.bpm:.0f} clock_age={now - last_clock:.2f} "
                       f"clocks={clocks} len={md['len']} page={s.page} "
                       f"track={md['track'] + 1} view={md['frame'][1]:#06x} head={md['frame'][2]} "
                       f"queue={inbox.qsize()} leds={led_count}", flush=True)

@@ -25,7 +25,11 @@ class App:
         top.pack(fill="x")
         ttk.Label(top, text="Tempo").pack(side="left")
         self.bpm = tk.StringVar(value="120")
-        ttk.Spinbox(top, from_=30, to=300, width=5, textvariable=self.bpm).pack(side="left", padx=(4, 12))
+        self.tempo = tk.Spinbox(top, from_=30, to=300, width=5, textvariable=self.bpm,
+                                command=self.send_bpm)     # classic: ttk's showed empty on Tk 9
+        self.tempo.pack(side="left", padx=(4, 12))
+        self.tempo.bind("<Return>", lambda e: self.send_bpm())
+        self.bpm.set("120")
         self.button = ttk.Button(top, text="Start", command=self.toggle)
         self.button.pack(side="left")
         ttk.Button(top, text="Release BSP", command=self.release).pack(side="left", padx=8)
@@ -43,12 +47,23 @@ class App:
             self.start()
 
     def start(self):
-        self.proc = subprocess.Popen(child_cmd("--surface", self.bpm.get()), stdin=subprocess.PIPE,
+        try:
+            bpm = str(max(30, min(300, round(float(self.bpm.get())))))
+        except ValueError:            # an empty box once crashed the surface at start
+            bpm = "120"
+        self.bpm.set(bpm)
+        self.proc = subprocess.Popen(child_cmd("--surface", bpm), stdin=subprocess.PIPE,
                                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                      bufsize=1, env={**os.environ, "PYTHONUNBUFFERED": "1"})
         threading.Thread(target=self.read, args=(self.proc,), daemon=True).start()
         self.button.config(text="Stop")
         self.status.set("starting…")
+
+    def send_bpm(self):
+        """Tempo box -> the running surface (the TEMPO knob comes back via the status)."""
+        if self.proc and self.proc.poll() is None:
+            self.proc.stdin.write(f"bpm {self.bpm.get()}\n")
+            self.proc.stdin.flush()
 
     def stop(self):
         try:
@@ -75,18 +90,27 @@ class App:
             if line is None:
                 self.button.config(text="Start")
                 self.status.set("stopped")
+            elif line.startswith("tempo ") and self.root.focus_get() is not self.tempo:
+                self.bpm.set(line.split()[1])               # knob turn: show it at once
+                self.add_log(line)
             elif line.startswith("status "):
                 f = dict(kv.split("=", 1) for kv in line.split()[1:] if "=" in kv)
+                if "bpm" in f and self.root.focus_get() is not self.tempo:
+                    self.bpm.set(f["bpm"])                  # TEMPO knob turns show here
                 self.status.set(f"{'playing' if f.get('running') == 'True' else 'ready'} · "
+                                f"{f.get('bpm', '?')} BPM · "
                                 f"track {f.get('track', '?')} · page {int(f.get('page', 0)) + 1} · "
                                 f"length {f.get('len', '?')}")
             else:
-                self.log.config(state="normal")
-                self.log.insert("end", line + "\n")
-                self.log.delete("1.0", "end-500l")
-                self.log.see("end")
-                self.log.config(state="disabled")
+                self.add_log(line)
         self.root.after(100, self.pump)
+
+    def add_log(self, line):
+        self.log.config(state="normal")
+        self.log.insert("end", line + "\n")
+        self.log.delete("1.0", "end-500l")
+        self.log.see("end")
+        self.log.config(state="disabled")
 
     def quit(self):
         if self.proc and self.proc.poll() is None:
