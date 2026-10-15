@@ -42,6 +42,10 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt
 Build the app: `./build.sh` (PyInstaller; output in `build/dist/`). Tagging `v*` builds
 macOS and Windows zips on GitHub Actions and attaches them to the release.
 
+Each run writes a timestamped log: macOS `~/Library/Logs/BSP Machinedrum/`, Windows
+`%LOCALAPPDATA%\BSP Machinedrum\logs\` (last 20 kept). Stalls are logged as `! slow MD read`
+or `! light loop stalled`.
+
 ## Controls
 
 | BSP | Machinedrum |

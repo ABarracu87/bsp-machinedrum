@@ -53,6 +53,7 @@ SURFACE_CLOCK = True          # True: the surface is the master clock (BSP follo
                               # Ableton syncs to the BSP input, EXT on); TEMPO knob sets the BPM.
                               # False: the BSP is master (Auto-sync clock burst, fixed tempo).
 TEMPO = 120.0                 # start tempo (surface clock); surface.py run <bpm>
+STALL = 0.15                  # s: log a read or light-loop gap longer than this (hiccups)
 RESET_QUIET = 0.25            # s without LED writes after a knob reset (reset_stress.py)
 RESET_HUSH = 0.025            # s without clock ticks either side of a knob reset (reset_stress.py)
 TEMPO_KNOB = 0x66             # report CC of the big TEMPO encoder (encoder 16)
@@ -454,7 +455,10 @@ def run(*args):
         while True:
             try:
                 now = time.time()
+                t_read = time.time()
                 _, bits, _, lit, dots = panel_frame(eyes.mcp)
+                if time.time() - t_read > STALL:            # hiccup diagnosis: slow MCP read
+                    print(f"! slow MD read {1000 * (time.time() - t_read):.0f} ms", flush=True)
                 page, md["pages"] = md["dots"].feed(now, dots, md["playing"])
                 md["track"] = pick_track(md["track"], lit)
                 md["tracks_lit"] = lit
@@ -515,9 +519,14 @@ def run(*args):
 
     threading.Thread(target=worker, daemon=True).start()
     clocks, last_clock, last_status, led_count = 0, 0.0, 0.0, 0
+    last_loop = last_stall = time.time()
     try:
         while True:
             now = time.time()
+            if now - last_loop > STALL and now - last_stall > 1.0:   # hiccup diagnosis
+                print(f"! light loop stalled {1000 * (now - last_loop):.0f} ms", flush=True)
+                last_stall = now
+            last_loop = now
             while (m := mi.get_message()):
                 b = m[0]
                 if b[0] == 0xF8:

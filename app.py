@@ -3,11 +3,15 @@
 Start runs the surface as a child process (its own clock, MIDI and MCP threads stay out of
 the UI); Stop sends "q" on its stdin so it cleans up (clock off, BSP report mode off).
 The same executable is the child: `app --surface <bpm>` / `app --release`."""
-import os, queue, subprocess, sys, threading
+import os, queue, subprocess, sys, threading, time
+from pathlib import Path
 import tkinter as tk
 from tkinter import ttk
 
 FROZEN = getattr(sys, "frozen", False)
+LOG_DIR = (Path.home() / "Library/Logs/BSP Machinedrum" if sys.platform == "darwin"
+           else Path(os.environ.get("LOCALAPPDATA", Path.home())) / "BSP Machinedrum" / "logs")
+KEEP_LOGS = 20
 
 
 def child_cmd(*args):
@@ -80,8 +84,16 @@ class App:
         self.lines.put((out.stdout + out.stderr).strip() or "BSP released")
 
     def read(self, proc):
-        for line in proc.stdout:
-            self.lines.put(line.rstrip())
+        """Child output -> the window, and every line (status too) to a timestamped log file
+        per run, so a hiccup can be looked up afterwards."""
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        for old in sorted(LOG_DIR.glob("surface_*.log"))[:-KEEP_LOGS]:
+            old.unlink()
+        with open(LOG_DIR / f"surface_{time.strftime('%Y%m%d-%H%M%S')}.log", "w") as log:
+            for line in proc.stdout:
+                log.write(f"{time.strftime('%H:%M:%S')} {line}")
+                log.flush()
+                self.lines.put(line.rstrip())
         self.lines.put(None)          # child ended
 
     def pump(self):
