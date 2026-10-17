@@ -41,6 +41,9 @@ class App:
         ttk.Button(top, text="Release BSP", command=self.release).pack(side="left", padx=8)
         self.status = tk.StringVar(value="stopped")
         ttk.Label(root, textvariable=self.status, padding=(8, 0)).pack(fill="x")
+        self.alarm = tk.Label(root, text="", fg="#b00020", font=("TkDefaultFont", 14, "bold"),
+                              anchor="w", justify="left", wraplength=500)
+        self.alarm.pack(fill="x", padx=8)
         self.log = tk.Text(root, height=18, wrap="none", state="disabled")
         self.log.pack(fill="both", expand=True, padx=8, pady=8)
         root.protocol("WM_DELETE_WINDOW", self.quit)
@@ -104,6 +107,7 @@ class App:
         while not self.lines.empty():
             line = self.lines.get()
             if line is None:
+                self.alarm.config(text="")
                 self.button.config(text="Start")
                 self.status.set("stopped")
             elif line.startswith("tempo ") and self.root.focus_get() is not self.tempo:
@@ -118,6 +122,12 @@ class App:
                                 f"track {f.get('track', '?')} · page {int(f.get('page', 0)) + 1} · "
                                 f"length {f.get('len', '?')}")
             else:
+                if line.startswith("! BSP FROZEN"):
+                    self.alarm.config(text="BSP frozen: power-cycle the BeatStep Pro.\n"
+                                           "The app reconnects by itself, then press PLAY.")
+                    self.root.bell()
+                elif line.startswith("BSP back"):
+                    self.alarm.config(text="")
                 self.add_log(line)
         self.root.after(100, self.pump)
 

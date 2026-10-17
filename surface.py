@@ -254,6 +254,8 @@ class Surface:
         accel = next((x for limit, x in KNOB_ACCEL if 0 <= dt < limit), 1)
         last, self.knob_val[k] = self.knob_val.get(k), v
         print(f"knob {k + 1}: {last} -> {v}", flush=True)
+        if last is None and v in (0, 127):
+            self.recenter(k)                                  # left at an end: queue a reset
         if last is None or v == last:
             return                                            # first report = baseline
         d = (v - last) / KNOB_STEP
@@ -368,7 +370,7 @@ class Surface:
 
 def run(*args):
     from panel import Panel
-    from mdmm_bsp import bsp_get, bsp_set
+    from mdmm_bsp import bsp_get, bsp_set, is_bsp_port
     import keys
     keys.no_app_nap()                   # the clock must not be throttled in the background
     if not keys.can_hold_keys():
@@ -390,7 +392,7 @@ def run(*args):
     if SURFACE_CLOCK and bsp_get(mi, mo, 0x41, AUTOSYNC) != 1:
         bsp_set(mo, 0x41, AUTOSYNC, 1)      # the BSP must follow our clock
         print("BSP Auto-sync switched on", flush=True)
-    mi.ignore_types(sysex=True, timing=False, active_sense=True)
+    mi.ignore_types(sysex=False, timing=False, active_sense=True)   # SysEx: freeze probe replies
     out = threading.Lock()
 
     def send(msg):
@@ -472,6 +474,34 @@ def run(*args):
     pads_shown = [None] * 16            # pad LEDs as last sent
 
     reset = {"quiet_until": 0.0, "last": 0.0, "pending": False}
+    probe = {"at": None, "sent": None, "frozen": False, "retry": 0.0}   # freeze alarm
+    QUERY = [0xF0, 0, 0x20, 0x6B, 0x7F, 0x42, 0x01, 0x00, 0x41, REPORT, 0xF7]
+    REPLY = [0xF0, 0, 0x20, 0x6B, 0x7F, 0x42, 0x02, 0x00, 0x41, REPORT]
+
+    def reconnect():
+        """After a power cycle: reopen the BSP ports, and if it answers, set it up again."""
+        import rtmidi
+        for port, name in ((mi, "in"), (mo, "out")):
+            port.close_port()
+            idx = [i for i, p in enumerate(port.get_ports()) if is_bsp_port(p)]
+            if not idx:
+                return False
+            port.open_port(idx[0])
+        mi.ignore_types(sysex=False, timing=False, active_sense=True)
+        try:
+            bsp_get(mi, mo, 0x41, REPORT)
+        except RuntimeError:
+            return False
+        mo.send_message([0xF0, 0, 0x20, 0x6B, 0x7F, 0x42, 0x02, 0x00, 0x41, ACCEL, 0, 0xF7])
+        if SURFACE_CLOCK:
+            bsp_set(mo, 0x41, AUTOSYNC, 1)
+        off = [0xF0, 0, 0x20, 0x6B, 0x7F, 0x42, 0x02, 0x00, 0x41, REPORT, 0, 0xF7]
+        mo.send_message(off + KNOB_RESET)   # report mode on, knobs at 64 (clock stopped)
+        reset["quiet_until"] = time.time() + RESET_QUIET
+        shown[:] = [None] * 16
+        pads_shown[:] = [None] * 16
+        s.knobs_at_64()
+        return True
 
     def recenter(k):
         """7D 7D 09 resets every knob counter to 64 (live 2026-10-14). It acts only
@@ -496,6 +526,7 @@ def run(*args):
             time.sleep(RESET_HUSH)
             reset["quiet_until"] = time.time() + RESET_QUIET
             reset["last"] = time.time()
+            probe["at"] = reset["last"] + RESET_QUIET + 0.35    # does it still answer?
         shown[:] = [None] * 16          # redraw the step LEDs after the quiet time
         pads_shown[:] = [None] * 16     # and the pads (a reset once left one lit)
         return True
@@ -556,10 +587,9 @@ def run(*args):
     if not sys.stdin.isatty():
         threading.Thread(target=stdin_quit, daemon=True).start()
     mo.send_message([0xF0, 0, 0x20, 0x6B, 0x7F, 0x42, 0x02, 0x00, 0x41, ACCEL, 0, 0xF7])
-    off = [0xF0, 0, 0x20, 0x6B, 0x7F, 0x42, 0x02, 0x00, 0x41, REPORT, 0, 0xF7]
-    mo.send_message(off + KNOB_RESET)   # knob reset = report mode with every knob at 64 (a
-    time.sleep(RESET_QUIET)             # restart keeps old counters). ONE packet, as in play:
-                                        # split in two (50 ms apart) it froze at start once
+    report_mode(mo, True)               # plain report mode, NO knob reset: a reset at start froze
+    time.sleep(RESET_QUIET)             # the BSP twice on 2026-10-17 (plain start: days, none).
+                                        # A knob left at an end resets on its first report.
     panel.grid_rec()                    # trig keys edit trigs
     print(__doc__)
     print("tip: put the BSP on an EMPTY drum pattern - its own drum notes would play the MD too")
@@ -591,8 +621,39 @@ def run(*args):
                 print(f"! light loop stalled {1000 * (now - last_loop):.0f} ms", flush=True)
                 last_stall = now
             last_loop = now
+            if probe["frozen"]:                    # alarm: wait for the power cycle
+                if now >= probe["retry"]:
+                    probe["retry"] = now + 1.0
+                    try:
+                        back = reconnect()
+                    except Exception:
+                        back = False
+                    if back:
+                        probe["frozen"] = False
+                        print("BSP back: reconnected, report mode on. Press PLAY.", flush=True)
+                time.sleep(0.01)
+                continue
+            if probe["at"] is None and now - probe.get("last", 0) > 5.0 and now >= reset["quiet_until"]:
+                probe["at"] = now                  # and every 5 s anyway (a freeze at start)
+            if probe["at"] and now >= probe["at"] and probe["sent"] is None:
+                probe["last"] = now
+                send(QUERY)                        # one query after each knob reset
+                probe["sent"] = now
+            if probe["sent"] and now - probe["sent"] > 0.5:
+                probe["at"] = probe["sent"] = None
+                probe["frozen"] = True
+                print("! BSP FROZEN: it stopped answering after a knob reset. Power-cycle the "
+                      "BeatStep Pro (unplug USB or switch it off and on); the app reconnects by "
+                      "itself.", flush=True)
+                if s.running:
+                    s.running = False
+                    surface_transport(False)       # stop the clock: the BSP is gone
+                continue
             while (m := mi.get_message()):
                 b = m[0]
+                if b[:10] == REPLY:
+                    probe["at"] = probe["sent"] = None     # it answered: alive
+                    continue
                 if b[0] == 0xF8:
                     clocks += 1                    # the BSP's clock: playing or not
                     last_clock = now
