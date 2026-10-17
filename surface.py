@@ -359,6 +359,10 @@ def run(*args):
     from mdmm_bsp import bsp_get, bsp_set
     import keys
     keys.no_app_nap()                   # the clock must not be throttled in the background
+    if not keys.can_hold_keys():
+        print("! No Accessibility permission: p-locks will NOT work (macOS drops the Shift key). "
+              "System Settings > Privacy & Security > Accessibility: remove 'BSP Machinedrum', "
+              "add it again, switch it on, restart the app.", flush=True)
     mi, mo = bsp_ports()
     for attempt in range(10):           # a BSP just powered on can take a moment
         try:

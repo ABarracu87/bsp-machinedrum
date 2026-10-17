@@ -18,6 +18,12 @@ if sys.platform == "darwin":
     def frontmost_pid():
         return AppKit.NSWorkspace.sharedWorkspace().frontmostApplication().processIdentifier()
 
+    def can_hold_keys():
+        """Accessibility permission: without it macOS drops our Shift key silently and
+        p-locks become plain taps. A rebuilt (re-signed) app loses it (2026-10-17)."""
+        from ApplicationServices import AXIsProcessTrusted
+        return bool(AXIsProcessTrusted())
+
     _activity = None
 
     def no_app_nap():
@@ -40,6 +46,9 @@ elif sys.platform == "win32":
 
     def no_app_nap():
         pass                          # no App Nap on Windows
+
+    def can_hold_keys():
+        return True
 
     def frontmost_pid():
         pid = wintypes.DWORD()
