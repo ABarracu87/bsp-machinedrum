@@ -56,6 +56,7 @@ STALL = 0.15                  # s: log a read or light-loop gap longer than this
 LED_GAP, LED_CAP, LED_WINDOW = 0.004, 10, 0.1   # LED writes to the BSP: >= 4 ms apart, <= 10
                               # per 100 ms (user: limit what we send back at once, 2026-10-17)
 RESET_PRE_QUIET = 0.15        # s without LED writes BEFORE a knob reset
+RESET_IDLE = 0.3              # s with no knob report before a knob reset
 RESET_MIN_GAP = 0.6           # s between knob resets (stress-tested spacing: 0.5 s)
 RESET_QUIET = 0.25            # s without LED writes after a knob reset (reset_stress.py)
 RESET_HUSH = 0.025            # s without clock ticks either side of a knob reset (reset_stress.py)
@@ -153,6 +154,7 @@ class Surface:
         self.toggled = {}               # step -> time: shown at once, before the RAM catches up
         self.length_arm = None          # time of LST STEP: the next step sets the length
         self.shift_at = -1e9            # last SHIFT (or shifted arrow): no releases reported
+        self.last_knob = 0.0            # time of the last knob report
         self.running = False            # our transport (the BSP ignores Start/Stop in report mode)
         self.md = {"trigs": [0] * 16, "len": 16, "track": 0, "playing": False,   # MD reader
                    "frame": (0, 0, None), "pages": 1, "tracks_lit": []}
@@ -240,6 +242,7 @@ class Surface:
         self.tempo_val = 64
 
     def turn(self, k, v, now):
+        self.last_knob = time.time()            # knob motion: resets wait for a pause
         last, self.knob_val[k] = self.knob_val.get(k), v
         print(f"knob {k + 1}: {last} -> {v}", flush=True)
         if last is None or v == last:
@@ -470,10 +473,10 @@ def run(*args):
         2026-10-14/15: clock+START+LEDs 0.25 s later FROZE after 4; the same with no
         tick 25 ms either side: 60 ok. So: hold the clock RESET_HUSH s either side
         (the late tick catches up) and no LED writes for RESET_QUIET s."""
-        if time.time() - reset["last"] < RESET_MIN_GAP:   # a fast spin: resets 2-3 per second
-            reset["pending"] = True     # froze the BSP after 27 (2026-10-17); the stress test
-            return False                # only ever spaced them 0.5 s. Done later (LED loop).
-        reset["pending"] = False
+        if k != "now":                  # from a knob report: only mark it. The LED loop does it
+            reset["pending"] = True     # once no knob moved for RESET_IDLE s (every real freeze
+            return False                # had a knob in motion at the reset) and RESET_MIN_GAP
+        reset["pending"] = False        # passed; one thread, so never two resets at once
         off = [0xF0, 0, 0x20, 0x6B, 0x7F, 0x42, 0x02, 0x00, 0x41, REPORT, 0, 0xF7]
         reset["quiet_until"] = time.time() + 10      # no new LED writes from now on, and
         while led_sent and time.time() - led_sent[-1] < RESET_PRE_QUIET:   # none in the
@@ -598,9 +601,10 @@ def run(*args):
             L = md["len"] or 16                    # RAM length; the MD's page dots win
             if (L + 15) // 16 != md["pages"]:      # when they disagree (stale RAM copy)
                 L = md["pages"] * 16
-            if reset["pending"] and now - reset["last"] >= RESET_MIN_GAP and recenter(None):
-                s.knobs_at_64()                    # deferred knob reset (RESET_MIN_GAP)
-                print(f"  knobs recentred (deferred) {time.strftime('%H:%M:%S')}", flush=True)
+            if (reset["pending"] and now - reset["last"] >= RESET_MIN_GAP
+                    and now - s.last_knob >= RESET_IDLE and recenter("now")):
+                s.knobs_at_64()                    # knob reset, done here only (one thread)
+                print(f"  knobs recentred {time.strftime('%H:%M:%S')}", flush=True)
             if now < reset["quiet_until"]:         # no LED writes right after a reset
                 time.sleep(0.002)
                 continue
