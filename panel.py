@@ -20,7 +20,7 @@ KNOWN = [0, BUFFER_B, -0x2258]  # pattern blocks seen so far (shift from A)
 MISSES = 3                      # reads with no match before searching RAM
 shift, _misses = 0, 0
 MENU_GAP = 0.3                 # s between MD menu presses (0.12 dropped one, 2026-10-15)
-LCD_BOX = (475, 158.75, 285)    # lcdArea x, y, width on the screenshot the values below come from
+LCD_BOX = (475, 158.75, 285, 155)   # lcdArea x, y, w, h on the screenshot the values below come from
 FOCUS_ROW = (245, 555, 700)    # scale-setup underline row on the screenshot: y, x0, x1
 FOCUS_FIELDS = (("steps", 610), ("total", 670), ("mult", 999))   # solid-line centre < edge
 HOLD_TIMEOUT = 10.0            # never keep Shift down longer than this
@@ -347,8 +347,9 @@ class Panel:
         underlines the values with dots and the focused one SOLID; the lines follow the
         digits, so classify the longest solid run by where it sits (live 2026-10-15)."""
         box = self.mcp.tool("get_element", id="lcdArea")["box"]     # the window may be scaled:
-        k = box["width"] / LCD_BOX[2]                               # measured at LCD_BOX size
-        at = lambda x, y: (round(box["x"] + (x - LCD_BOX[0]) * k), round(box["y"] + (y - LCD_BOX[1]) * k))
+        k = box["width"] / LCD_BOX[2]                               # measured at LCD_BOX size;
+        ky = box["height"] / LCD_BOX[3]                             # re-read on every call
+        at = lambda x, y: (round(box["x"] + (x - LCD_BOX[0]) * k), round(box["y"] + (y - LCD_BOX[1]) * ky))
         x0, y = at(FOCUS_ROW[1], FOCUS_ROW[0])
         x1, _ = at(FOCUS_ROW[2], FOCUS_ROW[0])
         row, best, run = self.lcd_row(y, x0, x1) + [False], (0, 0), 0
