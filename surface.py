@@ -556,10 +556,10 @@ def run(*args):
     if not sys.stdin.isatty():
         threading.Thread(target=stdin_quit, daemon=True).start()
     mo.send_message([0xF0, 0, 0x20, 0x6B, 0x7F, 0x42, 0x02, 0x00, 0x41, ACCEL, 0, 0xF7])
-    report_mode(mo, False)              # knob reset = report mode with every knob at 64:
-    time.sleep(0.05)                    # a restart keeps the old counters, and a knob left
-    mo.send_message(KNOB_RESET)         # at its end sends nothing that way (2026-10-15)
-    time.sleep(RESET_QUIET)             # clock stopped here; no LEDs right after it
+    off = [0xF0, 0, 0x20, 0x6B, 0x7F, 0x42, 0x02, 0x00, 0x41, REPORT, 0, 0xF7]
+    mo.send_message(off + KNOB_RESET)   # knob reset = report mode with every knob at 64 (a
+    time.sleep(RESET_QUIET)             # restart keeps old counters). ONE packet, as in play:
+                                        # split in two (50 ms apart) it froze at start once
     panel.grid_rec()                    # trig keys edit trigs
     print(__doc__)
     print("tip: put the BSP on an EMPTY drum pattern - its own drum notes would play the MD too")
