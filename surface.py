@@ -351,6 +351,8 @@ class Surface:
 def run(*args):
     from panel import Panel
     from mdmm_bsp import bsp_get, bsp_set
+    import keys
+    keys.no_app_nap()                   # the clock must not be throttled in the background
     mi, mo = bsp_ports()
     accel = bsp_get(mi, mo, 0x41, ACCEL)    # (needs SysEx on: read before ignoring it)
     if SURFACE_CLOCK and bsp_get(mi, mo, 0x41, AUTOSYNC) != 1:
@@ -398,6 +400,8 @@ def run(*args):
             clock_on.clear()
             send([0xFC])
 
+    clock_warned = [0.0]
+
     def clock():
         """24 clocks per beat at s.bpm: sleep to ~1 ms before the tick, then spin."""
         while True:
@@ -410,6 +414,10 @@ def run(*args):
                 while time.perf_counter() < nxt:
                     pass
                 send([0xF8])
+                late = time.perf_counter() - nxt          # hiccup diagnosis; a knob reset
+                if late > STALL / 10 and time.time() - clock_warned[0] > 1.0:   # shows ~50 ms
+                    clock_warned[0] = time.time()
+                    print(f"! clock late {1000 * late:.0f} ms", flush=True)
 
     shown = [None] * 16                 # step LEDs as last sent
     pads_shown = [None] * 16            # pad LEDs as last sent

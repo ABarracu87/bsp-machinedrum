@@ -18,6 +18,16 @@ if sys.platform == "darwin":
     def frontmost_pid():
         return AppKit.NSWorkspace.sharedWorkspace().frontmostApplication().processIdentifier()
 
+    _activity = None
+
+    def no_app_nap():
+        """Opt out of App Nap: in the background (the user works in the DAW) macOS throttles
+        timers, and the MIDI clock showed ~70 ms stalls (2026-10-17). Kept for the process."""
+        global _activity
+        from Foundation import NSActivityLatencyCritical, NSActivityUserInitiated, NSProcessInfo
+        _activity = NSProcessInfo.processInfo().beginActivityWithOptions_reason_(
+            NSActivityUserInitiated | NSActivityLatencyCritical, "MIDI clock")
+
 elif sys.platform == "win32":
     import ctypes
     from ctypes import wintypes
@@ -27,6 +37,9 @@ elif sys.platform == "win32":
 
     def shift(down):
         _user32.keybd_event(_VK_SHIFT, 0, 0 if down else _KEYUP, 0)
+
+    def no_app_nap():
+        pass                          # no App Nap on Windows
 
     def frontmost_pid():
         pid = wintypes.DWORD()
