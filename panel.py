@@ -239,7 +239,13 @@ class Panel:
         atexit.register(self.release)
 
     def turn(self, element, detents):
-        self.mcp.tool("mouse_wheel", id=element, deltaY=-WHEEL * detents)
+        """Wheel `detents` as events of at most 0.5 each: one bigger event trips the
+        plugin's own wheel acceleration (jumps). A held trig stays held while turning."""
+        n = max(1, round(abs(detents) / 0.5))
+        for _ in range(n):
+            self.mcp.tool("mouse_wheel", id=element, deltaY=-WHEEL * detents / n)
+        if self.held is not None:
+            self.held_at = time.time()          # the watchdog counts from the last turn
 
     def encoder(self, idx, detents):
         self.turn("enc" + ENCODERS[idx], detents)

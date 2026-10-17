@@ -38,7 +38,9 @@ KNOB0 = 0x20                  # knob k (0-15) turns = CC 0x20+k, touch id = 0x20
 KNOB_STEP = 8                 # report values per detent (acceleration setting does not change it)
 FINE = 0.5                    # wheel per report: 0.5 = ~1 MD step (1.0 trips the plugin's wheel accel)
 TAP_WAIT = 0.5                # a step tap waits this long for a knob touch (= p-lock)
-KNOB_IDLE = 2.5               # a p-lock ends this long after the last knob turn
+KNOB_IDLE = 6.0               # a p-lock ends this long after the last knob turn (user: 2.5 s
+                              # expired too soon, 2026-10-17); a step press ends it at once
+KNOB_ACCEL = ((0.03, 4), (0.06, 2))   # (s between reports, x) fast turns move further
 MIRROR_PERIOD = 0.02          # MD panel reads while playing (one find_elements, ~10 ms)
 IDLE_PERIOD = 0.1             # ... while stopped (each read costs Live CPU: 2026-10-15)
 EDIT_STEPS = 3                # a LED flip outlasting this many steps is an edit, not the playhead
@@ -155,6 +157,7 @@ class Surface:
         self.length_arm = None          # time of LST STEP: the next step sets the length
         self.shift_at = -1e9            # last SHIFT (or shifted arrow): no releases reported
         self.last_knob = 0.0            # time of the last knob report
+        self.knob_t = {}                # knob -> time of its last report (acceleration)
         self.running = False            # our transport (the BSP ignores Start/Stop in report mode)
         self.md = {"trigs": [0] * 16, "len": 16, "track": 0, "playing": False,   # MD reader
                    "frame": (0, 0, None), "pages": 1, "tracks_lit": []}
@@ -215,6 +218,10 @@ class Surface:
                 self.md["len"] = steps                        # no RAM read while playing
             print(f"MD last step -> {steps}: {'ok' if ok else 'FAILED'}", flush=True)
         elif cc == PRESS and STEP0 <= v < STEP0 + 16:
+            if self.lock is not None:             # a step press ends the p-lock first: a
+                print(f"p-lock step {self.lock + 1}: released (step pressed)", flush=True)
+                self.panel.release()              # trig still held under Shift made the next
+                self.lock = self.idle_since = None    # press act on it (cancelled trigs)
             step = v - STEP0                      # tap, or one of several p-locked steps
             self.holds[step] = (now, self.page)   # the page as pressed, not after TAP_WAIT
             self.toggled[self.page * 16 + step] = [now, None]   # light toggles at once
@@ -243,12 +250,14 @@ class Surface:
 
     def turn(self, k, v, now):
         self.last_knob = time.time()            # knob motion: resets wait for a pause
+        dt, self.knob_t[k] = now - self.knob_t.get(k, -1e9), now
+        accel = next((x for limit, x in KNOB_ACCEL if 0 <= dt < limit), 1)
         last, self.knob_val[k] = self.knob_val.get(k), v
         print(f"knob {k + 1}: {last} -> {v}", flush=True)
         if last is None or v == last:
             return                                            # first report = baseline
         d = (v - last) / KNOB_STEP
-        detents = (int(d) if abs(d) >= 1 else (1 if d > 0 else -1)) * FINE
+        detents = (int(d) if abs(d) >= 1 else (1 if d > 0 else -1)) * FINE * accel
         block, slot = knob_slot(k)
         if self.holds:
             for st, (_, page) in self.holds.items():      # a p-lock, not a tap: undo the light
@@ -658,11 +667,17 @@ def test():
     s.report([0xB0, KNOB0 + 0, 64], 1.2)                           # baseline (first report)
     s.report([0xB0, KNOB0 + 0, 80], 1.3)                           # turn: lock step 3
     assert p.log == [("hold", 2), ("encoder", 0, 1.0)] and s.lock == 2  # +16 = 2 reports on A
-    s.tick(3.5); assert s.lock == 2
-    s.tick(3.9); assert p.log[-1] == ("release",) and s.lock is None
+    q = Fake(); u = Surface(q)                                     # a step press ends a lock
+    u.report([0xB0, PRESS, STEP0 + 1], 10.0); u.report([0xB0, KNOB0, 64], 10.1)
+    u.report([0xB0, KNOB0, 80], 10.2); assert u.lock == 1
+    u.report([0xB0, PRESS, STEP0 + 5], 10.3); assert q.log[-1] == ("release",) and u.lock is None
+    s.tick(7.1); assert s.lock == 2                                # 1.3 + KNOB_IDLE
+    s.tick(7.4); assert p.log[-1] == ("release",) and s.lock is None
     assert ("tap", 2) not in p.log                                 # a lock never toggles
     s.report([0xB0, KNOB0 + 8, 40], 3.0); s.report([0xB0, KNOB0 + 8, 32], 3.1)
     assert p.log[-1] == ("encoder", 4, -0.5)                       # knob 9 = E
+    s.report([0xB0, KNOB0 + 8, 24], 3.12); assert p.log[-1] == ("encoder", 4, -2.0)  # fast: x4
+    s.report([0xB0, KNOB0 + 8, 16], 3.16); assert p.log[-1] == ("encoder", 4, -1.0)  # x2
     s.report([0xB0, PRESS, PAGE_BTN], 3.2); assert p.log[-1] == ("next_page", 1)
     s.report([0xB0, PRESS, REC], 3.3); assert p.log[-1] == ("press", "btRec")
     sent = []; s.bsp_send = sent.append
