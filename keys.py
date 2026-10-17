@@ -21,8 +21,10 @@ if sys.platform == "darwin":
     def can_hold_keys():
         """Accessibility permission: without it macOS drops our Shift key silently and
         p-locks become plain taps. A rebuilt (re-signed) app loses it (2026-10-17)."""
-        from ApplicationServices import AXIsProcessTrusted
-        return bool(AXIsProcessTrusted())
+        from ApplicationServices import AXIsProcessTrustedWithOptions, kAXTrustedCheckOptionPrompt
+        # prompt: macOS shows its dialog and lists the app under Accessibility (unticked);
+        # without it the app is missing from the list until added by hand
+        return bool(AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: True}))
 
     _activity = None
 
