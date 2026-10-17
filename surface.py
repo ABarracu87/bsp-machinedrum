@@ -44,7 +44,6 @@ IDLE_PERIOD = 0.1             # ... while stopped (each read costs Live CPU: 202
 EDIT_STEPS = 3                # a LED flip outlasting this many steps is an edit, not the playhead
 RAM_PERIOD = 1.0              # MD RAM reads, for the length only (the server ignores ranges,
                               # so each read is the full 1 MiB snapshot)
-RAM_PERIOD_PLAYING = 5.0      # ... while playing (the page dots cover the page count)
 OFF, RED, GREEN = 0x00, 0x01, 0x04
 SPECIAL = {6: "encLevel", 15: "encSound"}
 
@@ -190,7 +189,7 @@ class Surface:
             self.shift_at = now                               # SHIFT+arrow: whole pages
             pages = max(1, min(4, self.md["pages"] + (1 if v == NEXT else -1)))
             ok = self.panel.set_pages(pages)
-            self.md["pages"] = pages                          # until the reader sees the dots
+            self.md["pages"], self.md["len"] = pages, pages * 16   # steps follow the total
             if "dots" in self.md:
                 self.md["dots"].pages = pages                 # playing, the tracker only grows
             self.page = min(self.page, pages - 1)
@@ -205,7 +204,10 @@ class Surface:
         elif cc == PRESS and STEP0 <= v < STEP0 + 16 and self.length_arm:
             steps = self.page * 16 + v - STEP0 + 1           # inside the page shown
             self.length_arm = None
-            print(f"MD last step -> {steps}: {'ok' if self.panel.set_end(steps) else 'FAILED'}", flush=True)
+            ok = self.panel.set_end(steps)
+            if ok:
+                self.md["len"] = steps                        # no RAM read while playing
+            print(f"MD last step -> {steps}: {'ok' if ok else 'FAILED'}", flush=True)
         elif cc == PRESS and STEP0 <= v < STEP0 + 16:
             step = v - STEP0                      # tap, or one of several p-locked steps
             self.holds[step] = (now, self.page)   # the page as pressed, not after TAP_WAIT
@@ -472,12 +474,11 @@ def run(*args):
                 md["tracks_lit"] = lit
                 mirror.update(bits, (md["track"], page), md["playing"], now, 15.0 / s.bpm)
                 md["frame"] = (page, mirror.trigs, mirror.head)   # one object: never half a page turn
-                if now - last_ram >= (RAM_PERIOD_PLAYING if md["playing"] else RAM_PERIOD):
-                    last_ram = now
-                    ram = eyes.ram()        # length only (LST STEP, page count)
-                    if not md["playing"]:   # playing, the LEDs carry the playhead
-                        pick_buffer(ram, md["track"], page, bits)
-                    md["len"] = length(None, ram)
+                if not md["playing"] and now - last_ram >= RAM_PERIOD:
+                    last_ram = now          # never while playing: a 1 MiB get_state is the
+                    ram = eyes.ram()        # suspect for MD timing hiccups (2026-10-17)
+                    pick_buffer(ram, md["track"], page, bits)
+                    md["len"] = length(None, ram)   # length only; the setters update it too
             except Exception as e:      # a timed-out read must not kill the lights
                 print(f"! MD read failed: {e!r}", flush=True)
             time.sleep(MIRROR_PERIOD if md["playing"] else IDLE_PERIOD)
