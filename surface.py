@@ -620,6 +620,7 @@ def run(*args):
     threading.Thread(target=worker, daemon=True).start()
     clocks, last_clock, last_status, led_count = 0, 0.0, 0.0, 0
     last_loop = last_stall = time.time()
+    big_redraw = [None]
     try:
         while True:
             now = time.time()
@@ -694,7 +695,9 @@ def run(*args):
             s.page, view, head = md["frame"]       # the BSP shows the MD's page
             step = s.page * 16 + head if playing and head is not None else None
             cols = s.colors(view << 16 * s.page, L, step, now)
-            if sum(c != shown[i] for i, c in enumerate(cols)) >= 8 and None not in shown:
+            if (sum(c != shown[i] for i, c in enumerate(cols)) >= 8 and None not in shown
+                    and cols != big_redraw[0]):          # once per target, not per held-back pass
+                big_redraw[0] = cols
                 print("  big redraw (pattern/page change?)", flush=True)   # freeze diagnosis
             for i, c in enumerate(cols):
                 if c != shown[i]:
