@@ -53,6 +53,7 @@ SURFACE_CLOCK = True          # True: the surface is the master clock (BSP follo
                               # False: the BSP is master (Auto-sync clock burst, fixed tempo).
 TEMPO = 120.0                 # start tempo (surface clock); surface.py run <bpm>
 STALL = 0.15                  # s: log a read or light-loop gap longer than this (hiccups)
+RESET_MIN_GAP = 0.6           # s between knob resets (stress-tested spacing: 0.5 s)
 RESET_QUIET = 0.25            # s without LED writes after a knob reset (reset_stress.py)
 RESET_HUSH = 0.025            # s without clock ticks either side of a knob reset (reset_stress.py)
 TEMPO_KNOB = 0x66             # report CC of the big TEMPO encoder (encoder 16)
@@ -434,7 +435,7 @@ def run(*args):
     shown = [None] * 16                 # step LEDs as last sent
     pads_shown = [None] * 16            # pad LEDs as last sent
 
-    reset = {"quiet_until": 0.0}
+    reset = {"quiet_until": 0.0, "last": 0.0, "pending": False}
 
     def recenter(k):
         """7D 7D 09 resets every knob counter to 64 (live 2026-10-14). It acts only
@@ -445,6 +446,10 @@ def run(*args):
         2026-10-14/15: clock+START+LEDs 0.25 s later FROZE after 4; the same with no
         tick 25 ms either side: 60 ok. So: hold the clock RESET_HUSH s either side
         (the late tick catches up) and no LED writes for RESET_QUIET s."""
+        if time.time() - reset["last"] < RESET_MIN_GAP:   # a fast spin: resets 2-3 per second
+            reset["pending"] = True     # froze the BSP after 27 (2026-10-17); the stress test
+            return False                # only ever spaced them 0.5 s. Done later (LED loop).
+        reset["pending"] = False
         off = [0xF0, 0, 0x20, 0x6B, 0x7F, 0x42, 0x02, 0x00, 0x41, REPORT, 0, 0xF7]
         with out:                       # the clock thread waits on this lock
             reset["quiet_until"] = time.time() + 2 * RESET_HUSH + RESET_QUIET   # before the
@@ -452,6 +457,7 @@ def run(*args):
             mo.send_message(off + KNOB_RESET)   # one packet: no normal-mode frame between
             time.sleep(RESET_HUSH)
             reset["quiet_until"] = time.time() + RESET_QUIET
+            reset["last"] = time.time()
         shown[:] = [None] * 16          # redraw the step LEDs after the quiet time
         pads_shown[:] = [None] * 16     # and the pads (a reset once left one lit)
         return True
@@ -566,6 +572,9 @@ def run(*args):
             L = md["len"] or 16                    # RAM length; the MD's page dots win
             if (L + 15) // 16 != md["pages"]:      # when they disagree (stale RAM copy)
                 L = md["pages"] * 16
+            if reset["pending"] and now - reset["last"] >= RESET_MIN_GAP and recenter(None):
+                s.knobs_at_64()                    # deferred knob reset (RESET_MIN_GAP)
+                print(f"  knobs recentred (deferred) {time.strftime('%H:%M:%S')}", flush=True)
             if now < reset["quiet_until"]:         # no LED writes right after a reset
                 time.sleep(0.002)
                 continue

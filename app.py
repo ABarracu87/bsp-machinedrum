@@ -91,7 +91,8 @@ class App:
             old.unlink()
         with open(LOG_DIR / f"surface_{time.strftime('%Y%m%d-%H%M%S')}.log", "w") as log:
             for line in proc.stdout:
-                log.write(f"{time.strftime('%H:%M:%S')} {line}")
+                now = time.time()
+                log.write(f"{time.strftime('%H:%M:%S', time.localtime(now))}.{int(now * 1000) % 1000:03d} {line}")
                 log.flush()
                 self.lines.put(line.rstrip())
         self.lines.put(None)          # child ended
