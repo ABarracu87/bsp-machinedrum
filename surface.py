@@ -367,6 +367,16 @@ def run(*args):
         with out:
             mo.send_message(msg)
 
+    def send_led(msg):
+        """An LED write, checked against the post-reset quiet time UNDER the lock: a write
+        that was waiting for the lock during a reset went out ~25 ms after it, and the BSP
+        froze on the 16th reset (2026-10-17). -> False when held back (redraw later)."""
+        with out:
+            if time.time() < reset["quiet_until"]:
+                return False
+            mo.send_message(msg)
+            return True
+
     transport_playing = False
 
     def bsp_transport(play):
@@ -437,10 +447,11 @@ def run(*args):
         (the late tick catches up) and no LED writes for RESET_QUIET s."""
         off = [0xF0, 0, 0x20, 0x6B, 0x7F, 0x42, 0x02, 0x00, 0x41, REPORT, 0, 0xF7]
         with out:                       # the clock thread waits on this lock
-            time.sleep(RESET_HUSH)
+            reset["quiet_until"] = time.time() + 2 * RESET_HUSH + RESET_QUIET   # before the
+            time.sleep(RESET_HUSH)              # reset: send_led checks it under this lock
             mo.send_message(off + KNOB_RESET)   # one packet: no normal-mode frame between
             time.sleep(RESET_HUSH)
-        reset["quiet_until"] = time.time() + RESET_QUIET
+            reset["quiet_until"] = time.time() + RESET_QUIET
         shown[:] = [None] * 16          # redraw the step LEDs after the quiet time
         pads_shown[:] = [None] * 16     # and the pads (a reset once left one lit)
         return True
@@ -561,16 +572,20 @@ def run(*args):
             on = {track_pad(t) for t in md["tracks_lit"]}   # pads = the MD's track lights
             for i in range(16):
                 if (i in on) != pads_shown[i]:
-                    send(pad_led_msg(i, i in on))
+                    if not send_led(pad_led_msg(i, i in on)):
+                        break
                     pads_shown[i] = i in on
                     led_count += 1
                     time.sleep(0.001)
             s.page, view, head = md["frame"]       # the BSP shows the MD's page
             step = s.page * 16 + head if playing and head is not None else None
             cols = s.colors(view << 16 * s.page, L, step, now)
+            if sum(c != shown[i] for i, c in enumerate(cols)) >= 8 and None not in shown:
+                print("  big redraw (pattern/page change?)", flush=True)   # freeze diagnosis
             for i, c in enumerate(cols):
                 if c != shown[i]:
-                    send(led_msg(i, c))
+                    if not send_led(led_msg(i, c)):
+                        break
                     shown[i] = c
                     led_count += 1
                     time.sleep(0.001)              # no bursts next to the clock

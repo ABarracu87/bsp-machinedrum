@@ -20,19 +20,23 @@ def send(m):
 
 
 clock_on = threading.Event()
+midgap = []                               # packets the clock thread sends between two ticks
 
 
 def clock(bpm=120):
-    nxt = time.perf_counter()
+    nxt, period = time.perf_counter(), 60 / (bpm * 24)
     while True:
         clock_on.wait()
-        nxt = max(nxt + 60 / (bpm * 24), time.perf_counter() - 0.1)
+        nxt = max(nxt + period, time.perf_counter() - 0.1)
         while time.perf_counter() < nxt:
             time.sleep(0.0005)
         send([0xF8])
+        if midgap:                        # mid-gap: ~period/2 from both ticks, none delayed
+            time.sleep(period / 2)
+            send(midgap.pop(0))
 
 
-def phase(name, leds, clocked, gap=0.0, hush=0.0, start=True, secs=30):
+def phase(name, leds, clocked, gap=0.0, hush=0.0, start=True, secs=30, mid=False):
     if clocked:
         if start:
             send([0xFA])
@@ -48,10 +52,13 @@ def phase(name, leds, clocked, gap=0.0, hush=0.0, start=True, secs=30):
             if now - last_cc > 2.0:
                 return f"{name}: FROZE after {resets} resets ({now - t0:.1f} s)"
             if now >= nxt:
-                with out:                       # hush: no clock tick around the reset
-                    time.sleep(hush)
-                    mo.send_message(off + KNOB_RESET)
-                    time.sleep(hush)
+                if mid:                         # the clock thread places it mid-gap
+                    midgap.append(off + KNOB_RESET)
+                else:
+                    with out:                   # hush: no clock tick around the reset
+                        time.sleep(hush)
+                        mo.send_message(off + KNOB_RESET)
+                        time.sleep(hush)
                 resets += 1; nxt = now + 0.5
                 redraw = now + gap if leds else None
             if redraw and now >= redraw:
@@ -69,8 +76,9 @@ def phase(name, leds, clocked, gap=0.0, hush=0.0, start=True, secs=30):
 
 # Run 2: D stopped + LEDs 0.25 s later ok (60); E clock + LEDs 0.25 s later FROZE after 4.
 # Run 3 (2026-10-15): G ok (60), F ok (60). G = the surface's reset (RESET_HUSH, RESET_QUIET).
-PHASES = (("G clock+start, no tick 25 ms around reset, LEDs 0.25 s later", True, True, 0.25, 0.025),
-          ("F clock ticks only (no START), LEDs 0.25 s later", True, True, 0.25, 0.0, False))
+# Run 4 (2026-10-17): the 25 ms hush makes ~70 ms clock gaps (Ableton slaved skips a beat).
+PHASES = (("H clock+start, reset mid-gap (~10 ms from ticks, clock never delayed), LEDs 0.25 s later",
+           True, True, 0.25, 0.0, True, 30, True),)
 
 
 def main():
