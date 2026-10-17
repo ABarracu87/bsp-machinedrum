@@ -360,7 +360,17 @@ def run(*args):
     import keys
     keys.no_app_nap()                   # the clock must not be throttled in the background
     mi, mo = bsp_ports()
-    accel = bsp_get(mi, mo, 0x41, ACCEL)    # (needs SysEx on: read before ignoring it)
+    for attempt in range(10):           # a BSP just powered on can take a moment
+        try:
+            accel = bsp_get(mi, mo, 0x41, ACCEL)    # (needs SysEx on: read before ignoring it)
+            break
+        except RuntimeError:
+            time.sleep(0.5)
+    else:
+        print("! The BeatStep Pro does not answer: it is frozen or still starting. "
+              "Power-cycle it (unplug USB or switch it off and on), then press Start again.",
+              flush=True)
+        sys.exit(1)
     if SURFACE_CLOCK and bsp_get(mi, mo, 0x41, AUTOSYNC) != 1:
         bsp_set(mo, 0x41, AUTOSYNC, 1)      # the BSP must follow our clock
         print("BSP Auto-sync switched on", flush=True)
