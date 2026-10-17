@@ -16,3 +16,8 @@ python -m PyInstaller --noconfirm --windowed --name "BSP Machinedrum" $SIGN \
   --hidden-import surface --hidden-import panel --hidden-import mdmm_bsp \
   --hidden-import mcp --hidden-import keys \
   --distpath build/dist --workpath build/work --specpath build app.py
+# one signer for everything inside: a framework left with its old signature is refused at
+# launch ("different Team IDs", 2026-10-17)
+if [ -n "$SIGN" ]; then
+  codesign --force --deep --sign "$HASH" "build/dist/BSP Machinedrum.app"
+fi
