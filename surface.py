@@ -17,6 +17,7 @@ sequencer plays; the lights mirror the MD's panel, read over the plugin's MCP se
   pads                     select MD track (top row = 1-8); pads light like the MD's
                            track lights (selected steady, trigs flash)
   << >> / CHAN             MD page back/forward / cycle (like SCALE)
+  arrow above DRUM chan    MD LFO page on/off
   SHIFT, then << >>        pattern length: a page less/more (16-64)
   LST STEP, then a step    last step, inside the page shown (the total stays)
   REC / PLAY / STOP        MD RECORD, start/stop the clock
@@ -30,6 +31,7 @@ PRESS, RELEASE = 1, 3         # report CCs: value = control id
 STEP0, PAGE_BTN, REC, PLAY, STOP = 0x30, 0x1B, 0x57, 0x58, 0x59   # ids: MCC BeatStepProTest.json
 LST_STEP, PREV, NEXT, CHAN = 0x55, 0x52, 0x53, 0x54   # CHAN: id seen live 2026-10-14
 SHIFT = 0x56                  # press only, no release (live 2026-10-15)
+LFO_BTN = 0x1E                # right arrow above the drum channel button: MD LFO page on/off
 SHIFT_WINDOW = 1.5            # s: an arrow this soon after SHIFT (or a shifted arrow) = SHIFT+arrow
 LEN_ARM = 15.0                # LST STEP gives up after this long (press it again to cancel)
 AUTOSYNC = 17                 # global: Auto-sync (the BSP follows an incoming clock)
@@ -158,6 +160,7 @@ class Surface:
         self.shift_at = -1e9            # last SHIFT (or shifted arrow): no releases reported
         self.last_knob = 0.0            # time of the last knob report
         self.knob_t = {}                # knob -> time of its last report (acceleration)
+        self.lfo = False                # LFO page opened from the BSP
         self.running = False            # our transport (the BSP ignores Start/Stop in report mode)
         self.md = {"trigs": [0] * 16, "len": 16, "track": 0, "playing": False,   # MD reader
                    "frame": (0, 0, None), "pages": 1, "tracks_lit": []}
@@ -190,6 +193,9 @@ class Surface:
             print(f"press id {v:#04x}", flush=True)
         if cc == PRESS and v == SHIFT:
             self.shift_at = now
+        elif cc == PRESS and v == LFO_BTN:                    # MD LFO page (FUNCTION combo)
+            self.lfo = not self.lfo
+            self.panel.press("altLfo" if self.lfo else "btExit")
         elif cc == PRESS and v == LST_STEP:
             self.length_arm = None if self.length_arm else now
             print("length: press the last step (of the page shown)" if self.length_arm
@@ -772,6 +778,8 @@ def test():
     s.report([0xB0, PRESS, CHAN], 3.675); assert s.page == 0          # CHAN wraps like SCALE
     s.report([0xB0, PRESS, CHAN], 3.676); assert s.page == 1
     s.report([0xB0, PRESS, PLAY], 3.68); assert s.page == 1           # PLAY never moves the view
+    s.report([0xB0, PRESS, LFO_BTN], 3.681); assert p.log[-1] == ("press", "altLfo")
+    s.report([0xB0, PRESS, LFO_BTN], 3.682); assert p.log[-1] == ("press", "btExit")
     s.report([0xB0, PRESS, STEP0 + 15], 3.70); assert 31 in s.toggled # light at the press
     s.page = 0; s.tick(4.3)                                           # view moved before the tap
     assert p.log[-1] == ("tap", 15) and p.page == 1, p.log[-1]  # still page 2, step 16

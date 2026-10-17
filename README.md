@@ -57,6 +57,7 @@ or `! light loop stalled`.
 | TEMPO knob | tempo, 1 BPM per click |
 | Pads | select track (top row = tracks 1–8); pads light like the MD's track lights |
 | << >> / CHAN | page back / forward / cycle (like SCALE) |
+| Right arrow above the drum channel button | MD LFO page on / off |
 | SHIFT, then << >> (within 1.5 s) | pattern length: one page less / more (16–64) |
 | LST STEP, then a step | last step, inside the page shown (total length stays) |
 | REC / PLAY / STOP | MD RECORD, start / stop |
