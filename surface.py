@@ -503,7 +503,9 @@ def run(*args):
             bsp_set(mo, 0x41, AUTOSYNC, 1)
         off = [0xF0, 0, 0x20, 0x6B, 0x7F, 0x42, 0x02, 0x00, 0x41, REPORT, 0, 0xF7]
         mo.send_message(off + KNOB_RESET)   # report mode on, knobs at 64 (clock stopped)
-        reset["quiet_until"] = time.time() + RESET_QUIET
+        time.sleep(RESET_QUIET)
+        mo.send_message([0xFC])             # Stop through the BSP: Ableton (and the MD) kept
+        reset["quiet_until"] = time.time() + RESET_QUIET   # running alone while it was gone
         shown[:] = [None] * 16
         pads_shown[:] = [None] * 16
         s.knobs_at_64()
