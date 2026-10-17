@@ -23,6 +23,8 @@ def child_cmd(*args):
 class App:
     def __init__(self, root):
         self.root, self.proc, self.lines = root, None, queue.Queue()
+        import keys                   # this window holds Accessibility: it posts the Shift key
+        self.keys_port = keys.serve()
         root.title("BSP → Machinedrum")
         root.minsize(520, 360)
         top = ttk.Frame(root, padding=8)
@@ -56,9 +58,10 @@ class App:
         except ValueError:            # an empty box once crashed the surface at start
             bpm = "120"
         self.bpm.set(bpm)
+        env = {**os.environ, "PYTHONUNBUFFERED": "1", "BSPM_KEYS_PORT": str(self.keys_port)}
         self.proc = subprocess.Popen(child_cmd("--surface", bpm), stdin=subprocess.PIPE,
                                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                                     bufsize=1, env={**os.environ, "PYTHONUNBUFFERED": "1"})
+                                     bufsize=1, env=env)
         threading.Thread(target=self.read, args=(self.proc,), daemon=True).start()
         self.button.config(text="Stop")
         self.status.set("starting…")
