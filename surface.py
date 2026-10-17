@@ -53,6 +53,9 @@ SURFACE_CLOCK = True          # True: the surface is the master clock (BSP follo
                               # False: the BSP is master (Auto-sync clock burst, fixed tempo).
 TEMPO = 120.0                 # start tempo (surface clock); surface.py run <bpm>
 STALL = 0.15                  # s: log a read or light-loop gap longer than this (hiccups)
+LED_GAP, LED_CAP, LED_WINDOW = 0.004, 10, 0.1   # LED writes to the BSP: >= 4 ms apart, <= 10
+                              # per 100 ms (user: limit what we send back at once, 2026-10-17)
+RESET_PRE_QUIET = 0.15        # s without LED writes BEFORE a knob reset
 RESET_MIN_GAP = 0.6           # s between knob resets (stress-tested spacing: 0.5 s)
 RESET_QUIET = 0.25            # s without LED writes after a knob reset (reset_stress.py)
 RESET_HUSH = 0.025            # s without clock ticks either side of a knob reset (reset_stress.py)
@@ -368,14 +371,21 @@ def run(*args):
         with out:
             mo.send_message(msg)
 
+    led_sent = []                       # times of recent LED writes (the limiter)
+
     def send_led(msg):
-        """An LED write, checked against the post-reset quiet time UNDER the lock: a write
-        that was waiting for the lock during a reset went out ~25 ms after it, and the BSP
-        froze on the 16th reset (2026-10-17). -> False when held back (redraw later)."""
+        """An LED write, rate-limited and checked against the reset quiet time UNDER the
+        lock (a write waiting for the lock went out ~25 ms after a reset; the BSP froze on
+        the 16th, 2026-10-17). At most LED_CAP per LED_WINDOW s, LED_GAP s apart.
+        -> False when held back (the loop redraws it on a later pass)."""
         with out:
-            if time.time() < reset["quiet_until"]:
+            now = time.time()
+            del led_sent[:-LED_CAP]
+            if (now < reset["quiet_until"] or (led_sent and now - led_sent[-1] < LED_GAP)
+                    or (len(led_sent) == LED_CAP and now - led_sent[0] < LED_WINDOW)):
                 return False
             mo.send_message(msg)
+            led_sent.append(now)
             return True
 
     transport_playing = False
@@ -451,9 +461,11 @@ def run(*args):
             return False                # only ever spaced them 0.5 s. Done later (LED loop).
         reset["pending"] = False
         off = [0xF0, 0, 0x20, 0x6B, 0x7F, 0x42, 0x02, 0x00, 0x41, REPORT, 0, 0xF7]
+        reset["quiet_until"] = time.time() + 10      # no new LED writes from now on, and
+        while led_sent and time.time() - led_sent[-1] < RESET_PRE_QUIET:   # none in the
+            time.sleep(0.005)                        # last RESET_PRE_QUIET s before it
         with out:                       # the clock thread waits on this lock
-            reset["quiet_until"] = time.time() + 2 * RESET_HUSH + RESET_QUIET   # before the
-            time.sleep(RESET_HUSH)              # reset: send_led checks it under this lock
+            time.sleep(RESET_HUSH)
             mo.send_message(off + KNOB_RESET)   # one packet: no normal-mode frame between
             time.sleep(RESET_HUSH)
             reset["quiet_until"] = time.time() + RESET_QUIET
@@ -585,7 +597,6 @@ def run(*args):
                         break
                     pads_shown[i] = i in on
                     led_count += 1
-                    time.sleep(0.001)
             s.page, view, head = md["frame"]       # the BSP shows the MD's page
             step = s.page * 16 + head if playing and head is not None else None
             cols = s.colors(view << 16 * s.page, L, step, now)
@@ -594,10 +605,9 @@ def run(*args):
             for i, c in enumerate(cols):
                 if c != shown[i]:
                     if not send_led(led_msg(i, c)):
-                        break
+                        break                      # limited: the rest on a later pass
                     shown[i] = c
                     led_count += 1
-                    time.sleep(0.001)              # no bursts next to the clock
             time.sleep(0.002)
     finally:
         if SURFACE_CLOCK and s.running:
