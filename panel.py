@@ -296,6 +296,14 @@ class Panel:
             time.sleep(0.03)
         return self.current_track() == track
 
+    def ready(self):
+        """The plugin answers element queries only while its window is open (an error text
+        comes back otherwise; it crashed the start after an Ableton restart, 2026-10-18)."""
+        try:
+            return isinstance(self.mcp.tool("get_element", id="ledRecord"), dict)
+        except Exception:
+            return False
+
     def grid_rec(self):
         """Make sure the MD is in GRID RECORDING (trig keys edit trigs)."""
         led = self.mcp.tool("get_element", id="ledRecord")

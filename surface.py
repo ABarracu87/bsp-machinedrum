@@ -598,6 +598,12 @@ def run(*args):
     report_mode(mo, True)               # plain report mode, NO knob reset: a reset at start froze
     time.sleep(RESET_QUIET)             # the BSP twice on 2026-10-17 (plain start: days, none).
                                         # A knob left at an end resets on its first report.
+    if not panel.ready():
+        print("! Open the Machinedrum plugin window in Ableton: the app reads its panel. "
+              "Waiting...", flush=True)
+        while not panel.ready():
+            time.sleep(1.0)
+        print("MD plugin window found", flush=True)
     panel.grid_rec()                    # trig keys edit trigs
     print(__doc__)
     print("tip: put the BSP on an EMPTY drum pattern - its own drum notes would play the MD too")
