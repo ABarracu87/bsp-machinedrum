@@ -308,15 +308,15 @@ class Panel:
     def page_count(self):
         """MM: pages in the pattern. Its page dots show only the edited page in grid record and
         all available pages outside it (live 2026-10-21), so step out of grid record to look."""
-        rec = "lit" in self.mcp.tool("get_element", id=self.prof["rec"])["class"].split()
+        rec = self.recording()
         if rec:
-            self.press("btRec")
+            self.grid_rec(False)
         seen = set()
         for _ in range(6):                      # the playing page's dot may be flashing
             time.sleep(0.05)
             seen |= set(panel_frame(self.mcp, self.machine)[4])
         if rec:
-            self.press("btRec")
+            self.grid_rec(True)
         return max(seen) + 1 if seen else 1
 
     def data_page(self, d):
@@ -394,11 +394,19 @@ class Panel:
         except Exception:
             return False
 
-    def grid_rec(self):
-        """Make sure the MD is in GRID RECORDING (trig keys edit trigs)."""
-        led = self.mcp.tool("get_element", id=self.prof["rec"])
-        if "lit" not in led["class"].split():
+    def recording(self):
+        return "lit" in self.mcp.tool("get_element", id=self.prof["rec"])["class"].split()
+
+    def grid_rec(self, on=True):
+        """GRID RECORDING on (trig keys edit trigs) or off, closed-loop: one REC press was
+        lost on the MM and its light lags, so trig keys played notes (live 2026-10-21)."""
+        for _ in range(4):
+            if self.recording() == on:
+                return True
             self.press("btRec")
+            time.sleep(0.35)
+        print(f"! {self.machine}: grid record did not turn {'on' if on else 'off'}", flush=True)
+        return False
 
     def ram(self):
         """MD patch RAM (1 MiB); the current pattern lives at PATTERN."""
