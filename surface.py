@@ -22,7 +22,7 @@ sequencer plays; the lights mirror the MD's panel, read over the plugin's MCP se
   LST STEP, then a step    last step, inside the page shown (the total stays)
   REC / PLAY / STOP        MD RECORD, start/stop the clock
 """
-import _thread, queue, signal, sys, threading, time
+import _thread, queue, signal, sys, threading, time, traceback
 
 from mdmm_bsp import MD_NOTES, bsp_ports, knob_slot, pad_track
 
@@ -140,6 +140,13 @@ def pad_led_msg(pad, on):
     """Pad LED ctrl 0x70 + pad (pad 0 = bottom-left, as the pad notes); on/off only:
     8..127 all light fully (live 2026-10-15)."""
     return [0xF0, 0, 0x20, 0x6B, 0x7F, 0x42, 0x02, 0x00, 0x10, 0x70 + pad, 0x7F if on else 0, 0xF7]
+
+
+def button_led_msg(button, on):
+    """Button LED, ctrl = the button's report id (DRUM 0x1A, SEQ1 0x10, mutes 0x12/0x1C; live
+    2026-10-21; the mute buttons light blue). Never ctrl 0x1F / 0x5F: firmware actions."""
+    assert button not in (0x1F, 0x5F)
+    return [0xF0, 0, 0x20, 0x6B, 0x7F, 0x42, 0x02, 0x00, 0x10, button, 0x7F if on else 0, 0xF7]
 
 
 def track_pad(track):
@@ -586,6 +593,7 @@ def run(*args):
 
     shown = [None] * 16                 # step LEDs as last sent
     pads_shown = [None] * 16            # pad LEDs as last sent
+    btn_shown = [None]                  # machine whose button (DRUM / SEQ1) is lit
 
     reset = {"quiet_until": 0.0, "last": 0.0, "pending": False}
     probe = {"at": None, "sent": None, "frozen": False, "retry": 0.0}   # freeze alarm
@@ -616,6 +624,7 @@ def run(*args):
         reset["quiet_until"] = time.time() + RESET_QUIET   # running alone while it was gone
         shown[:] = [None] * 16
         pads_shown[:] = [None] * 16
+        btn_shown[0] = None
         s.knobs_at_64()
         return True
 
@@ -645,6 +654,7 @@ def run(*args):
             probe["at"] = reset["last"] + RESET_QUIET + 0.35    # does it still answer?
         shown[:] = [None] * 16          # redraw the step LEDs after the quiet time
         pads_shown[:] = [None] * 16     # and the pads (a reset once left one lit)
+        btn_shown[0] = None
         return True
 
     s = Surface(panel, bsp_send=surface_transport if SURFACE_CLOCK else bsp_transport,
@@ -658,7 +668,7 @@ def run(*args):
 
     eyes = {m: Panel(m) for m, p in panels.items() if p}   # own MCP clients: reading never
                                                             # blocks the buttons/LEDs
-    view = {"mirror": Mirror()}
+    mirror_box = {"mirror": Mirror()}   # (not "view": the light loop uses that name)
     md["dots"] = PageDots()             # page shown / pages from the dots, also while playing
     md["colours"] = [None] * 16
     for p in panels.values():
@@ -673,7 +683,7 @@ def run(*args):
         p.grid_rec()
 
     def switched(machine):
-        view["mirror"] = Mirror()
+        mirror_box["mirror"] = Mirror()
         md["dots"] = PageDots()
         shown[:] = [None] * 16
         pads_shown[:] = [None] * 16
@@ -700,7 +710,7 @@ def run(*args):
                 md["track"] = pick_track(md["track"], lit)
                 md["tracks_lit"] = lit
                 md["colours"] = colours
-                mirror = view["mirror"]
+                mirror = mirror_box["mirror"]
                 mirror.update(bits, (md["track"], page), md["playing"], now, 15.0 / s.bpm)
                 md["frame"] = (page, mirror.trigs, mirror.head)   # one object: never half a page turn
                 if machine == "MD" and not md["playing"] and now - last_ram >= RAM_PERIOD:
@@ -709,7 +719,8 @@ def run(*args):
                     pick_buffer(ram, md["track"], page, bits)
                     md["len"] = length(None, ram)   # length only; the setters update it too
             except Exception as e:      # a timed-out read must not kill the lights
-                print(f"! MD read failed: {e!r}", flush=True)
+                where = traceback.extract_tb(e.__traceback__)[-1]
+                print(f"! MD read failed: {e!r} ({where.name}:{where.lineno})", flush=True)
             time.sleep(MIRROR_PERIOD if md["playing"] else IDLE_PERIOD)
 
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
@@ -829,6 +840,10 @@ def run(*args):
             if now < reset["quiet_until"]:         # no LED writes right after a reset
                 time.sleep(0.002)
                 continue
+            if btn_shown[0] != s.machine:          # DRUM / SEQ1 lit for the machine in use (the
+                if (send_led(button_led_msg(DRUM_BTN, s.machine == "MD"))   # LED ids = the
+                        and send_led(button_led_msg(SEQ1_BTN, s.machine == "MM"))):  # button ids)
+                    btn_shown[0] = s.machine
             on = (set(s.mm_notes) if s.machine == "MM"           # MM: the pads played
                   else {track_pad(t) for t in md["tracks_lit"]}) # MD: its track lights
             for i in range(16):
