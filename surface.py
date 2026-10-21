@@ -166,6 +166,7 @@ class Surface:
         self.panels = panels or {"MD": panel}   # machine -> its Panel (None if not loaded)
         self.machine = next(m for m, p in self.panels.items() if p is panel)
         self.track_of = {"MD": 0, "MM": 0}      # each machine's selected track
+        self.muted = {"MD": set(), "MM": set()} # muted tracks (MM: read; MD: our own toggles)
         self.octave = OCTAVE
         self.mm_notes = {}              # pad -> MM note sounding (released on pad off)
         self.data_page_t = 0.0          # last knob-8 page step (one page per flick)
@@ -285,6 +286,8 @@ class Surface:
             t = self.md["track"] if m == self.machine else self.track_of[m]
             if self.panels.get(m) is not None:
                 ok = self.panels[m].mute(t)
+                if ok:
+                    self.muted[m] ^= {t}            # MM: the reader corrects it from the lights
                 print(f"{m} mute track {t + 1}: {'ok' if ok else 'not available'}", flush=True)
         elif cc == PRESS and v == LFO_BTN and self.machine == "MD":   # MD LFO page
             self.lfo = not self.lfo
@@ -594,6 +597,7 @@ def run(*args):
     shown = [None] * 16                 # step LEDs as last sent
     pads_shown = [None] * 16            # pad LEDs as last sent
     btn_shown = [None]                  # machine whose button (DRUM / SEQ1) is lit
+    mute_shown = {MD_MUTE: None, MM_MUTE: None}   # mute button lights as last sent
 
     reset = {"quiet_until": 0.0, "last": 0.0, "pending": False}
     probe = {"at": None, "sent": None, "frozen": False, "retry": 0.0}   # freeze alarm
@@ -625,6 +629,7 @@ def run(*args):
         shown[:] = [None] * 16
         pads_shown[:] = [None] * 16
         btn_shown[0] = None
+        mute_shown.update(dict.fromkeys(mute_shown))
         s.knobs_at_64()
         return True
 
@@ -655,6 +660,7 @@ def run(*args):
         shown[:] = [None] * 16          # redraw the step LEDs after the quiet time
         pads_shown[:] = [None] * 16     # and the pads (a reset once left one lit)
         btn_shown[0] = None
+        mute_shown.update(dict.fromkeys(mute_shown))
         return True
 
     s = Surface(panel, bsp_send=surface_transport if SURFACE_CLOCK else bsp_transport,
@@ -698,7 +704,9 @@ def run(*args):
                 now = time.time()
                 t_read = time.time()
                 machine = s.machine
-                _, bits, _, lit, dots, colours = panel_frame(eyes[machine].mcp, machine)
+                _, bits, _, lit, dots, colours, muted = panel_frame(eyes[machine].mcp, machine)
+                if machine == "MM":
+                    s.muted["MM"] = set(muted)
                 if time.time() - t_read > STALL:            # hiccup diagnosis: slow MCP read
                     print(f"! slow MD read {1000 * (time.time() - t_read):.0f} ms", flush=True)
                 if machine != s.machine:
@@ -844,6 +852,11 @@ def run(*args):
                 if (send_led(button_led_msg(DRUM_BTN, s.machine == "MD"))   # LED ids = the
                         and send_led(button_led_msg(SEQ1_BTN, s.machine == "MM"))):  # button ids)
                     btn_shown[0] = s.machine
+            for b, m in ((MD_MUTE, "MD"), (MM_MUTE, "MM")):    # lit = that machine's
+                t = s.md["track"] if m == s.machine else s.track_of[m]   # selected track is muted
+                want = t in s.muted[m]
+                if mute_shown[b] != want and send_led(button_led_msg(b, want)):
+                    mute_shown[b] = want
             on = (set(s.mm_notes) if s.machine == "MM"           # MM: the pads played
                   else {track_pad(t) for t in md["tracks_lit"]}) # MD: its track lights
             for i in range(16):
@@ -1007,6 +1020,8 @@ def test():
     assert m.trigs == m.known[(0, 0)] and m.trigs >> 4 & 1              # memory, not the trail
     # Monomachine mode (2026-10-21): SEQ1 / DRUM switch, pad keyboard, pitch entry, mutes
     md_p, mm_p = Fake(), Fake()
+    for f in (md_p, mm_p):
+        f.mute = lambda t, f=f: f.log.append(("mute", t)) or True
     w = Surface(md_p, panels={"MD": md_p, "MM": mm_p})
     w.report([0xB0, PRESS, SEQ1_BTN], 50.0); assert w.machine == "MM" and w.panel is mm_p
     w.report([0x9F, 36 + 2, 90], 50.1); assert mm_p.log[-1] == ("note_on", 64, 90)   # E4
@@ -1018,7 +1033,9 @@ def test():
     w.report([0xB0, PRESS, STEP0 + 5], 51.0); w.report([0x9F, 36 + 0, 90], 51.1)
     assert mm_p.log[-1] == ("pitch", 5, 72) and not w.holds                      # step 6 = C5
     w.report([0xB0, PRESS, MM_MUTE], 51.2); assert mm_p.log[-1] == ("mute", 3)
+    assert 3 in w.muted["MM"]
     w.report([0xB0, PRESS, MD_MUTE], 51.3); assert md_p.log[-1] == ("mute", 0)    # MD from MM
+    assert w.muted["MD"] == {0}
     w.report([0xB0, KNOB0 + DATA_PAGE_KNOB, 64], 51.4); w.report([0xB0, KNOB0 + DATA_PAGE_KNOB, 72], 51.5)
     assert mm_p.log[-1] == ("data_page", 1)
     w.md["colours"] = ["yellow"] + [None] * 15

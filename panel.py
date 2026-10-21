@@ -104,9 +104,9 @@ def scale(mcp):
 # green trigless/partial) and MM track lights are green (active) / red (selected).
 MACHINES = {
     "MD": {"plugin": "Gearmulator MD", "frame": ".mdStepLed, .mdScaleDot, .mdDrumLed",
-           "dot": "mdPatternPage", "track_on": "lit", "rec": "ledRecord", "tracks": 16, "ch": 0},
+           "dot": "mdPatternPage", "track_on": ("lit",), "rec": "ledRecord", "tracks": 16, "ch": 0},
     "MM": {"plugin": "Gearmulator MM", "frame": ".mmStepLed, .mmScaleDot, .mmTrackLed",
-           "dot": "mmTrackPage", "track_on": "red", "rec": "mmRecordLed", "tracks": 6,
+           "dot": "mmTrackPage", "track_on": ("red", "yellow"), "rec": "mmRecordLed", "tracks": 6,
            "ch": 8},                    # MM AUTO TRACK channel (manual default 9): the focus track
 }
 STEP_COLOURS = ("red", "yellow", "green")
@@ -134,11 +134,14 @@ def panel_frame(mcp, machine="MD"):
             colours[int(e["id"][7:])] = step_colour(e["class"])
     dots = ids(prof["dot"], lit)
     bits = sum(1 << i for i, c in enumerate(colours) if c)
-    tracks = ids("drumLed", lambda c: prof["track_on"] in c.split())
+    tracks = ids("drumLed", lambda c: any(k in c.split() for k in prof["track_on"]))
+    # MM track lights (manual): green active, red active+selected, off muted, yellow
+    # muted+selected. MD: no mute state outside its mute mode.
+    muted = ids("drumLed", lambda c: not {"green", "red"} & set(c.split())) if machine == "MM" else []
     # the last page's dot is always lit (= the length in pages); the other lit dot is the
     # page shown, so the shown page is the LOWEST lit dot (live 2026-10-14: 64 steps
     # cycled (2,3) (3,) (0,3) (1,3) under SCALE)
-    return (min(dots) if dots else 0), bits, (max(dots) + 1 if dots else 1), tracks, dots, colours
+    return (min(dots) if dots else 0), bits, (max(dots) + 1 if dots else 1), tracks, dots, colours, muted
 
 
 def png_row(path, y):
