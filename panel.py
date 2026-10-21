@@ -99,19 +99,46 @@ def scale(mcp):
     return {a: r[i] for i, a in enumerate(SCALE_FIELDS)}
 
 
-def panel_frame(mcp):
+# One profile per Gearmulator plugin (element ids/classes from get_dom_tree, 2026-10-21).
+# MD lights carry class "lit"; MM step lights carry their colour (red note, yellow note off,
+# green trigless/partial) and MM track lights are green (active) / red (selected).
+MACHINES = {
+    "MD": {"plugin": "Gearmulator MD", "frame": ".mdStepLed, .mdScaleDot, .mdDrumLed",
+           "dot": "mdPatternPage", "track_on": "lit", "rec": "ledRecord", "tracks": 16, "ch": 0},
+    "MM": {"plugin": "Gearmulator MM", "frame": ".mmStepLed, .mmScaleDot, .mmTrackLed",
+           "dot": "mmTrackPage", "track_on": "red", "rec": "mmRecordLed", "tracks": 6,
+           "ch": 8},                    # MM AUTO TRACK channel (manual default 9): the focus track
+}
+STEP_COLOURS = ("red", "yellow", "green")
+
+
+def step_colour(classes):
+    """Step light classes -> 'red' / 'yellow' / 'green' / None (MD 'lit' = 'red')."""
+    c = classes.split()
+    return next((k for k in STEP_COLOURS if k in c), "red" if "lit" in c else None)
+
+
+def panel_frame(mcp, machine="MD"):
     """-> (page shown 0-3, 16-bit word of the lit step LEDs, pages in the pattern, lit
-    tracks) as the MD panel shows them, from ONE find_elements call: one snapshot (no page
-    turn between reads) and 1/4 of the plugin's work (live 2026-10-15: a second poller at
-    14 polls/s added ~25% CPU to Live)."""
-    found = mcp.tool("find_elements", selector=".mdStepLed, .mdScaleDot, .mdDrumLed")["elements"]
-    lit = [e["id"] for e in found if "lit" in e["class"].split()]
-    num = lambda pre: [int(i[len(pre):]) for i in lit if i.startswith(pre)]
-    dots, bits = num("mdPatternPage"), sum(1 << b for b in num("stepLed"))
+    tracks, page dots, 16 step colours) as the panel shows them, from ONE find_elements
+    call: one snapshot (no page turn between reads) and 1/4 of the plugin's work (live
+    2026-10-15: a second poller at 14 polls/s added ~25% CPU to Live)."""
+    prof = MACHINES[machine]
+    found = mcp.tool("find_elements", selector=prof["frame"])["elements"]
+    ids = lambda pre, on: [int(e["id"][len(pre):]) for e in found
+                           if e["id"].startswith(pre) and on(e["class"])]
+    lit = lambda c: "lit" in c.split()
+    colours = [None] * 16
+    for e in found:
+        if e["id"].startswith("stepLed"):
+            colours[int(e["id"][7:])] = step_colour(e["class"])
+    dots = ids(prof["dot"], lit)
+    bits = sum(1 << i for i, c in enumerate(colours) if c)
+    tracks = ids("drumLed", lambda c: prof["track_on"] in c.split())
     # the last page's dot is always lit (= the length in pages); the other lit dot is the
     # page shown, so the shown page is the LOWEST lit dot (live 2026-10-14: 64 steps
     # cycled (2,3) (3,) (0,3) (1,3) under SCALE)
-    return (min(dots) if dots else 0), bits, (max(dots) + 1 if dots else 1), num("drumLed"), dots
+    return (min(dots) if dots else 0), bits, (max(dots) + 1 if dots else 1), tracks, dots, colours
 
 
 def png_row(path, y):
@@ -231,8 +258,10 @@ def pick_buffer(ram, track, page, bits):
 
 
 class Panel:
-    def __init__(self):
-        self.mcp = Mcp(find_port()[0], resolve=lambda: find_port()[0])
+    def __init__(self, machine="MD"):
+        self.machine, self.prof = machine, MACHINES[machine]
+        name = self.prof["plugin"]
+        self.mcp = Mcp(find_port(name)[0], resolve=lambda: find_port(name)[0])
         self.held = None           # trig index being held
         self.held_at = 0.0
         self.last_page = 0.0
@@ -261,6 +290,55 @@ class Panel:
     def press(self, element):
         self.mcp.tool("click_element", id=element)
 
+    def mute(self, track):
+        """MM: its mute label toggles the track (light green <-> off, live 2026-10-21)."""
+        if self.machine == "MM":
+            self.press(f"trackMute{track}")
+            return True
+        self._key("altMute")            # MD: mute mode (FUNCTION combo); its 16 step lights are
+        self._key(f"trigKey{track}")    # the tracks, a trig key toggles one (live 2026-10-21)
+        self._key("btExit")
+        self.grid_rec()                 # EXIT left grid record off
+        return True
+
+    def page_count(self):
+        """MM: pages in the pattern. Its page dots show only the edited page in grid record and
+        all available pages outside it (live 2026-10-21), so step out of grid record to look."""
+        rec = "lit" in self.mcp.tool("get_element", id=self.prof["rec"])["class"].split()
+        if rec:
+            self.press("btRec")
+        seen = set()
+        for _ in range(6):                      # the playing page's dot may be flashing
+            time.sleep(0.05)
+            seen |= set(panel_frame(self.mcp, self.machine)[4])
+        if rec:
+            self.press("btRec")
+        return max(seen) + 1 if seen else 1
+
+    def data_page(self, d):
+        """Parameter page up/down: MM DATA PAGE keys; MD PAGE (SYN -> FX -> ROUT)."""
+        if self.machine == "MM":
+            self.press("btDataNext" if d > 0 else "btDataPrev")
+        else:
+            self.next_page(d)
+
+    def note_on(self, note, velocity=100):
+        self.mcp.tool("send_midi", status=0x90 | self.prof["ch"], data1=note, data2=velocity)
+
+    def note_off(self, note):
+        self.mcp.tool("send_midi", status=0x80 | self.prof["ch"], data1=note, data2=0)
+
+    def pitch(self, step, note):
+        """MM grid record: hold the trig, play the key, release = the step's pitch (manual:
+        hold [TRIG] + keyboard key). An empty step gets a trig with that pitch."""
+        if not self.hold(step):
+            return False
+        self.note_on(note, 100)
+        time.sleep(0.05)
+        self.note_off(note)
+        self.release()
+        return True
+
     def note(self, note, velocity):
         """Play a track through the plugin's MCP server (channel = MD base channel)."""
         status = (0x90 if velocity else 0x80) | (MD_CH - 1)
@@ -273,18 +351,22 @@ class Panel:
         return [lit.get(f"stepLed{i}", False) for i in range(16)]
 
     def lit_tracks(self):
-        found = self.mcp.tool("find_elements", selector=".mdDrumLed")["elements"]
-        return [int(e["id"][7:]) for e in found if "lit" in e["class"].split()]
+        return panel_frame(self.mcp, self.machine)[3]
 
     def current_track(self):
         lit = self.lit_tracks()
         return lit[0] if len(lit) == 1 else None
 
     def select_track(self, track):
-        """SOUND wheel, closed-loop. (FUNCTION + trig key is NOT used: MCP clicks release
+        """MM: its TRACK key. MD: its track label (a click selects, live 2026-10-21); the
+        SOUND wheel, closed-loop, only as a fallback. (FUNCTION + trig key is NOT used: MCP clicks release
         FUNCTION before the trig key lands, so it toggled a trig - live 2026-10-14.)"""
         if self.current_track() == track:
             return True
+        self.press(f"btTrack{track + 1}" if self.machine == "MM" else f"trackLabel{track}")
+        time.sleep(0.05)
+        if self.current_track() == track or self.machine == "MM":
+            return self.current_track() == track
         for _ in range(40):            # wheel accelerates, so step and re-read
             cur = self.current_track()
             if cur == track:
@@ -300,13 +382,13 @@ class Panel:
         """The plugin answers element queries only while its window is open (an error text
         comes back otherwise; it crashed the start after an Ableton restart, 2026-10-18)."""
         try:
-            return isinstance(self.mcp.tool("get_element", id="ledRecord"), dict)
+            return isinstance(self.mcp.tool("get_element", id=self.prof["rec"]), dict)
         except Exception:
             return False
 
     def grid_rec(self):
         """Make sure the MD is in GRID RECORDING (trig keys edit trigs)."""
-        led = self.mcp.tool("get_element", id="ledRecord")
+        led = self.mcp.tool("get_element", id=self.prof["rec"])
         if "lit" not in led["class"].split():
             self.press("btRec")
 
@@ -379,7 +461,7 @@ class Panel:
         return False
 
     def _menu(self):
-        return panel_frame(self.mcp)
+        return panel_frame(self.mcp, self.machine)
 
     def _set_total(self, pages):
         """Total = `pages` (UP/DOWN wrap 16..64): only with the focus SEEN on the total, so
@@ -448,7 +530,7 @@ class Panel:
         """Make the MD show pattern page 0-3 (SCALE cycles them in grid record), closed-loop
         on the page dots. `shown()`: the page as a PageDots reader sees it (needed while
         playing: one read of the flashing dots is not the shown page). -> True when it does."""
-        shown = shown or getattr(self, "shown_page", None) or (lambda: panel_page_bits(self.mcp)[0])
+        shown = shown or getattr(self, "shown_page", None) or (lambda: panel_frame(self.mcp, self.machine)[0])
         for _ in range(5):
             if shown() == page:
                 return True

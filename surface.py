@@ -32,6 +32,15 @@ STEP0, PAGE_BTN, REC, PLAY, STOP = 0x30, 0x1B, 0x57, 0x58, 0x59   # ids: MCC Bea
 LST_STEP, PREV, NEXT, CHAN = 0x55, 0x52, 0x53, 0x54   # CHAN: id seen live 2026-10-14
 SHIFT = 0x56                  # press only, no release (live 2026-10-15)
 LFO_BTN = 0x1E                # right arrow above the drum channel button: MD LFO page on/off
+DRUM_BTN, SEQ1_BTN = 0x1A, 0x10   # machine select: DRUM = Machinedrum, SEQ1 = Monomachine
+MD_MUTE, MM_MUTE = 0x1C, 0x12     # mute/unmute that machine's selected track (2026-10-21)
+DATA_PAGE_KNOB = 7            # knob 8: data/parameter pages up/down (both machines)
+MM_CH = 8                     # Monomachine AUTO TRACK channel (0-based; manual default 9)
+OCTAVE = 4                    # MM pad keyboard start octave: C4 = note 60
+# MM pad keyboard, one octave (user layout 2026-10-21): pad 0-15, bottom-left first.
+# Bottom row C D E F G A B C', top row C# D# - F# G# A# octave- octave+.
+PAD_SEMI = {0: 0, 1: 2, 2: 4, 3: 5, 4: 7, 5: 9, 6: 11, 7: 12, 8: 1, 9: 3, 11: 6, 12: 8, 13: 10}
+PAD_OCT_DOWN, PAD_OCT_UP = 14, 15
 SHIFT_WINDOW = 1.5            # s: an arrow this soon after SHIFT (or a shifted arrow) = SHIFT+arrow
 LEN_ARM = 15.0                # LST STEP gives up after this long (press it again to cancel)
 AUTOSYNC = 17                 # global: Auto-sync (the BSP follows an incoming clock)
@@ -48,7 +57,8 @@ IDLE_PERIOD = 0.1             # ... while stopped (each read costs Live CPU: 202
 EDIT_STEPS = 3                # a LED flip outlasting this many steps is an edit, not the playhead
 RAM_PERIOD = 1.0              # MD RAM reads, for the length only (the server ignores ranges,
                               # so each read is the full 1 MiB snapshot)
-OFF, RED, GREEN = 0x00, 0x01, 0x04
+OFF, RED, GREEN, YELLOW, WHITE = 0x00, 0x01, 0x04, 0x05, 0x15   # step LED: 2 bits each R, G, B
+MM_COLOUR = {"red": RED, "yellow": YELLOW, "green": GREEN}       # MM trig light classes
 SPECIAL = {6: "encLevel", 15: "encSound"}
 
 
@@ -144,8 +154,14 @@ def led_msg(step, color):
 class Surface:
     """Report decoding and the tap / p-lock gesture. `panel` = panel.Panel (or a fake)."""
 
-    def __init__(self, panel, bsp_send=lambda msg: None, recenter=lambda k: True):
+    def __init__(self, panel, bsp_send=lambda msg: None, recenter=lambda k: True, panels=None):
         self.panel, self.bsp_send, self.recenter = panel, bsp_send, recenter
+        self.panels = panels or {"MD": panel}   # machine -> its Panel (None if not loaded)
+        self.machine = next(m for m, p in self.panels.items() if p is panel)
+        self.track_of = {"MD": 0, "MM": 0}      # each machine's selected track
+        self.octave = OCTAVE
+        self.mm_notes = {}              # pad -> MM note sounding (released on pad off)
+        self.data_page_t = 0.0          # last knob-8 page step (one page per flick)
         self.knob_val = {}              # knob -> last reported value
         self.pad_note = {}              # note -> velocity, until its pressure proves a pad
         self.bpm = TEMPO                # surface clock tempo (TEMPO knob: 1 BPM per detent)
@@ -165,9 +181,71 @@ class Surface:
         self.md = {"trigs": [0] * 16, "len": 16, "track": 0, "playing": False,   # MD reader
                    "frame": (0, 0, None), "pages": 1, "tracks_lit": []}
 
+    def switch(self, machine):
+        """DRUM / SEQ1: the BSP drives the other machine. Holds, locks and the view reset."""
+        if machine == self.machine:
+            return
+        if self.panels.get(machine) is None:
+            print(f"! {machine}: plugin not loaded (or its MCP server is off)", flush=True)
+            return
+        if self.lock is not None:
+            self.panel.release()
+            self.lock = self.idle_since = None
+        for pad, n in self.mm_notes.items():
+            self.panel.note_off(n)
+        self.mm_notes.clear()
+        self.track_of[self.machine] = self.md["track"]
+        self.machine, self.panel = machine, self.panels[machine]
+        self.holds.clear(); self.auto.clear(); self.toggled.clear()
+        self.page, self.length_arm, self.lfo = 0, None, False
+        self.md.update(track=self.track_of[machine], frame=(0, 0, None), pages=1, len=16,
+                       tracks_lit=[], colours=[None] * 16)
+        print(f"machine -> {machine}", flush=True)
+        self.on_switch(machine)
+
+    def on_switch(self, machine):
+        """run() hooks the reader/lights here."""
+
+    def mm_pad(self, pad, velocity, now):
+        """Monomachine pad keyboard: octave pads, SHIFT + pad 1-6 = track, a pad just after a
+        step = that step's pitch (hold TRIG + key), else play the note live."""
+        if pad == PAD_OCT_DOWN or pad == PAD_OCT_UP:
+            self.octave = max(0, min(8, self.octave + (1 if pad == PAD_OCT_UP else -1)))
+            print(f"MM octave {self.octave}", flush=True)
+            return
+        if now - self.shift_at < SHIFT_WINDOW and pad < 6:
+            self.shift_at = 0
+            self.md["track"] = self.track_of["MM"] = pad
+            print(f"MM track {pad + 1}: {'ok' if self.panel.select_track(pad) else 'FAILED'}", flush=True)
+            return
+        if pad not in PAD_SEMI:
+            return
+        note = 12 * (self.octave + 1) + PAD_SEMI[pad]
+        recent = [(st, pg) for st, (t, pg) in self.holds.items() if now - t < TAP_WAIT]
+        if recent:                                 # step then pad: the step's pitch
+            for st, pg in recent:
+                del self.holds[st]
+                self.toggled.pop(pg * 16 + st, None)
+                if pg == self.page:
+                    ok = self.panel.pitch(st, note)
+                    print(f"MM step {pg * 16 + st + 1} pitch {note}: {'ok' if ok else 'FAILED'}", flush=True)
+            return
+        self.mm_notes[pad] = note
+        self.panel.note_on(note, velocity)
+
     def report(self, msg, now):
         st, cc, v = msg[0], msg[1], msg[2] if len(msg) > 2 else 0
         kind, key = st & 0xF0, (st & 0x0F, msg[1])   # (channel, note)
+        if self.machine == "MM" and st & 0x0F == 15 and kind in (0x80, 0x90):
+            pad = msg[1] - 36                     # Control-mode pads: ch 16, notes 36-51
+            if 0 <= pad < 16:
+                if kind == 0x90 and v:
+                    self.mm_pad(pad, v, now)
+                elif pad in self.mm_notes:
+                    self.panel.note_off(self.mm_notes.pop(pad))
+            return
+        if self.machine == "MM" and kind == 0xA0:
+            return                                # pressure: not used on the MM
         if kind == 0x90 and v:                # pad OR the BSP's own sequencer (same channel):
             self.pad_note[key] = v            # wait for pressure, which only a real pad sends
             return
@@ -193,7 +271,15 @@ class Surface:
             print(f"press id {v:#04x}", flush=True)
         if cc == PRESS and v == SHIFT:
             self.shift_at = now
-        elif cc == PRESS and v == LFO_BTN:                    # MD LFO page (FUNCTION combo)
+        elif cc == PRESS and v in (DRUM_BTN, SEQ1_BTN):
+            self.switch("MD" if v == DRUM_BTN else "MM")
+        elif cc == PRESS and v in (MD_MUTE, MM_MUTE):
+            m = "MD" if v == MD_MUTE else "MM"
+            t = self.md["track"] if m == self.machine else self.track_of[m]
+            if self.panels.get(m) is not None:
+                ok = self.panels[m].mute(t)
+                print(f"{m} mute track {t + 1}: {'ok' if ok else 'not available'}", flush=True)
+        elif cc == PRESS and v == LFO_BTN and self.machine == "MD":   # MD LFO page
             self.lfo = not self.lfo
             self.panel.press("altLfo" if self.lfo else "btExit")
         elif cc == PRESS and v == LST_STEP:
@@ -232,7 +318,7 @@ class Surface:
             self.holds[step] = (now, self.page)   # the page as pressed, not after TAP_WAIT
             self.toggled[self.page * 16 + step] = [now, None]   # light toggles at once
         elif cc == PRESS and v == PAGE_BTN:
-            self.panel.next_page(1)
+            self.panel.data_page(1)
         elif cc == PRESS and v == REC:
             self.panel.press("btRec")
         elif cc == PRESS and v in (PLAY, STOP):
@@ -297,6 +383,16 @@ class Surface:
         if block == "L":
             print(f"  encoder {'ABCDEFGH'[slot]} {detents:+}", flush=True)
             self.panel.encoder(slot, detents)
+        elif k == DATA_PAGE_KNOB or (k == 15 and self.machine == "MM"):
+            if now - self.data_page_t < 0.15:                 # one step per flick
+                return
+            self.data_page_t = now
+            if k == DATA_PAGE_KNOB:
+                self.panel.data_page(1 if detents > 0 else -1)
+            else:                                             # MM: knob 16 = track 1-6
+                t = max(0, min(5, self.md["track"] + (1 if detents > 0 else -1)))
+                self.md["track"] = self.track_of["MM"] = t
+                self.panel.select_track(t)
         elif k in SPECIAL:
             self.panel.turn(SPECIAL[k], detents)
 
@@ -348,7 +444,8 @@ class Surface:
             self.lock = self.idle_since = None
 
     def colors(self, trigs, length, play_step, now):
-        """16 step colours: trigs of the shown page red, playhead green, p-locked step blinks."""
+        """16 step colours: trigs of the shown page red (MM: its red/yellow/green), playhead
+        white (user, 2026-10-21), p-locked step blinks."""
         if self.length_arm:                                   # choosing a length: show it
             page = self.page
             blink = int(now * 4) % 2
@@ -365,9 +462,10 @@ class Surface:
                 if on == want or now - t > 1.0:               # RAM caught up (or gave up)
                     del self.toggled[s]
                 on = want
-            c = RED if on else OFF
+            c = (MM_COLOUR.get(self.md.get("colours", [None] * 16)[i], RED)
+                 if self.machine == "MM" else RED) if on else OFF
             if play_step == s:
-                c = GREEN
+                c = WHITE
             if self.lock == i and int(now * 4) % 2:
                 c = OFF if c else RED
             out.append(c)
@@ -443,8 +541,18 @@ def run(*args):
                     time.sleep(0.021)
         threading.Thread(target=go, daemon=True).start()
 
-    panel = Panel()
     from panel import PageDots, length, pick_buffer, panel_frame
+    panels = {}
+    for m in ("MD", "MM"):              # each loaded Gearmulator plugin (its MCP server on)
+        try:
+            panels[m] = Panel(m)
+        except Exception as e:
+            panels[m] = None
+            print(f"{m} plugin not found ({e}); its mode is off", flush=True)
+    if not any(panels.values()):
+        print("! No Gearmulator MD or MM plugin with MCP found. Load one in Ableton.", flush=True)
+        sys.exit(1)
+    panel = panels["MD"] or panels["MM"]
     clock_on = threading.Event()
 
     def surface_transport(play):
@@ -540,7 +648,7 @@ def run(*args):
         return True
 
     s = Surface(panel, bsp_send=surface_transport if SURFACE_CLOCK else bsp_transport,
-                recenter=recenter)
+                recenter=recenter, panels=panels)
     if args:
         s.bpm = float(args[0])
     if SURFACE_CLOCK:
@@ -548,11 +656,30 @@ def run(*args):
         print(f"surface clock: {s.bpm:.0f} BPM (TEMPO knob: 1 BPM per click)", flush=True)
     md = s.md
 
-    eyes = Panel()                      # own MCP client: reading never blocks the buttons/LEDs
-
-    mirror = Mirror()
+    eyes = {m: Panel(m) for m, p in panels.items() if p}   # own MCP clients: reading never
+                                                            # blocks the buttons/LEDs
+    view = {"mirror": Mirror()}
     md["dots"] = PageDots()             # page shown / pages from the dots, also while playing
-    panel.shown_page = lambda: md["frame"][0]   # show_page closes its loop on what we see
+    md["colours"] = [None] * 16
+    for p in panels.values():
+        if p:
+            p.shown_page = lambda: md["frame"][0]   # show_page closes its loop on what we see
+
+    def prepare(machine):
+        """A machine taking over the BSP: grid record on, page count (MM), fresh lights."""
+        p = panels[machine]
+        if machine == "MM":
+            md["mm_pages"] = p.page_count()
+        p.grid_rec()
+
+    def switched(machine):
+        view["mirror"] = Mirror()
+        md["dots"] = PageDots()
+        shown[:] = [None] * 16
+        pads_shown[:] = [None] * 16
+        prepare(machine)
+
+    s.on_switch = switched
 
     def reader():                       # MD -> BSP: panel 50 Hz playing / 10 Hz stopped
         last_ram = 0.0
@@ -560,17 +687,25 @@ def run(*args):
             try:
                 now = time.time()
                 t_read = time.time()
-                _, bits, _, lit, dots = panel_frame(eyes.mcp)
+                machine = s.machine
+                _, bits, _, lit, dots, colours = panel_frame(eyes[machine].mcp, machine)
                 if time.time() - t_read > STALL:            # hiccup diagnosis: slow MCP read
                     print(f"! slow MD read {1000 * (time.time() - t_read):.0f} ms", flush=True)
-                page, md["pages"] = md["dots"].feed(now, dots, md["playing"])
+                if machine != s.machine:
+                    continue                # switched while reading: drop this frame
+                if machine == "MM":         # grid record: only the edited page's dot is lit
+                    page, md["pages"] = (min(dots) if dots else 0), md.get("mm_pages", 1)
+                else:
+                    page, md["pages"] = md["dots"].feed(now, dots, md["playing"])
                 md["track"] = pick_track(md["track"], lit)
                 md["tracks_lit"] = lit
+                md["colours"] = colours
+                mirror = view["mirror"]
                 mirror.update(bits, (md["track"], page), md["playing"], now, 15.0 / s.bpm)
                 md["frame"] = (page, mirror.trigs, mirror.head)   # one object: never half a page turn
-                if not md["playing"] and now - last_ram >= RAM_PERIOD:
+                if machine == "MD" and not md["playing"] and now - last_ram >= RAM_PERIOD:
                     last_ram = now          # never while playing: a 1 MiB get_state is the
-                    ram = eyes.ram()        # suspect for MD timing hiccups (2026-10-17)
+                    ram = eyes["MD"].ram()  # suspect for MD timing hiccups (2026-10-17)
                     pick_buffer(ram, md["track"], page, bits)
                     md["len"] = length(None, ram)   # length only; the setters update it too
             except Exception as e:      # a timed-out read must not kill the lights
@@ -599,12 +734,13 @@ def run(*args):
     time.sleep(RESET_QUIET)             # the BSP twice on 2026-10-17 (plain start: days, none).
                                         # A knob left at an end resets on its first report.
     if not panel.ready():
-        print("! Open the Machinedrum plugin window in Ableton: the app reads its panel. "
+        name = "Machinedrum" if s.machine == "MD" else "Monomachine"
+        print(f"! Open the {name} plugin window in Ableton: the app reads its panel. "
               "Waiting...", flush=True)
         while not panel.ready():
             time.sleep(1.0)
-        print("MD plugin window found", flush=True)
-    panel.grid_rec()                    # trig keys edit trigs
+        print(f"{name} plugin window found", flush=True)
+    prepare(s.machine)                  # grid record (trig keys edit trigs); MM page count
     print(__doc__)
     print("tip: put the BSP on an EMPTY drum pattern - its own drum notes would play the MD too")
     threading.Thread(target=reader, daemon=True).start()
@@ -621,7 +757,7 @@ def run(*args):
                 print(f"! report failed: {e!r}", flush=True)
             try:
                 s.tick(time.time())
-                panel.watchdog()
+                s.panel.watchdog()
             except Exception as e:
                 print(f"! tick failed: {e!r}", flush=True)
 
@@ -693,7 +829,8 @@ def run(*args):
             if now < reset["quiet_until"]:         # no LED writes right after a reset
                 time.sleep(0.002)
                 continue
-            on = {track_pad(t) for t in md["tracks_lit"]}   # pads = the MD's track lights
+            on = (set(s.mm_notes) if s.machine == "MM"           # MM: the pads played
+                  else {track_pad(t) for t in md["tracks_lit"]}) # MD: its track lights
             for i in range(16):
                 if (i in on) != pads_shown[i]:
                     if not send_led(pad_led_msg(i, i in on)):
@@ -717,7 +854,9 @@ def run(*args):
     finally:
         if SURFACE_CLOCK and s.running:
             surface_transport(False)    # stop the clock: the BSP falls back to INT
-        panel.release()
+        for p in panels.values():
+            if p:
+                p.release()
         report_mode(mo, False)
         mo.send_message([0xF0, 0, 0x20, 0x6B, 0x7F, 0x42, 0x02, 0x00, 0x41, ACCEL, accel, 0xF7])
         print("report mode off, knob acceleration restored")
@@ -756,7 +895,7 @@ def test():
     assert p.log[-1] == ("encoder", 4, -0.5)                       # knob 9 = E
     s.report([0xB0, KNOB0 + 8, 24], 3.12); assert p.log[-1] == ("encoder", 4, -2.0)  # fast: x4
     s.report([0xB0, KNOB0 + 8, 16], 3.16); assert p.log[-1] == ("encoder", 4, -1.0)  # x2
-    s.report([0xB0, PRESS, PAGE_BTN], 3.2); assert p.log[-1] == ("next_page", 1)
+    s.report([0xB0, PRESS, PAGE_BTN], 3.2); assert p.log[-1] == ("data_page", 1)
     s.report([0xB0, PRESS, REC], 3.3); assert p.log[-1] == ("press", "btRec")
     sent = []; s.bsp_send = sent.append
     s.report([0xB0, PRESS, PLAY], 3.4); assert s.running
@@ -799,7 +938,7 @@ def test():
     assert 1 in s2.toggled and s2.colors(0b10, 16, None, time.time())[1] == RED
     assert 1 not in s2.toggled                                             # RAM caught up
     cols = Surface(Fake()).colors(0b10001, 16, 4, 0.0)
-    assert cols[0] == RED and cols[4] == GREEN and cols[1] == OFF
+    assert cols[0] == RED and cols[4] == WHITE and cols[1] == OFF
     assert led_msg(3, RED) == [0xF0, 0, 0x20, 0x6B, 0x7F, 0x42, 2, 0, 0x10, 0x33, 1, 0xF7]
     # R11-style: several holds + one turn locks each in turn, nothing toggles
     p3, s3 = Fake(), Surface(Fake())
@@ -851,6 +990,27 @@ def test():
     m.update(0b1111, (0, 1), True, 2.0, 0.125)                          # page 2, unseen: LEDs
     m.update(0b1110000, (0, 0), True, 2.1, 0.125)                       # back to page 1 mid-play:
     assert m.trigs == m.known[(0, 0)] and m.trigs >> 4 & 1              # memory, not the trail
+    # Monomachine mode (2026-10-21): SEQ1 / DRUM switch, pad keyboard, pitch entry, mutes
+    md_p, mm_p = Fake(), Fake()
+    w = Surface(md_p, panels={"MD": md_p, "MM": mm_p})
+    w.report([0xB0, PRESS, SEQ1_BTN], 50.0); assert w.machine == "MM" and w.panel is mm_p
+    w.report([0x9F, 36 + 2, 90], 50.1); assert mm_p.log[-1] == ("note_on", 64, 90)   # E4
+    w.report([0x8F, 36 + 2, 0], 50.2); assert mm_p.log[-1] == ("note_off", 64)
+    w.report([0x9F, 36 + 15, 90], 50.3); assert w.octave == OCTAVE + 1               # oct +
+    w.report([0x9F, 36 + 8, 90], 50.4); assert mm_p.log[-1] == ("note_on", 73, 90)   # C#5
+    w.report([0xB0, PRESS, SHIFT], 50.5); w.report([0x9F, 36 + 3, 90], 50.6)
+    assert mm_p.log[-1] == ("select_track", 3) and w.track_of["MM"] == 3          # SHIFT+pad 4
+    w.report([0xB0, PRESS, STEP0 + 5], 51.0); w.report([0x9F, 36 + 0, 90], 51.1)
+    assert mm_p.log[-1] == ("pitch", 5, 72) and not w.holds                      # step 6 = C5
+    w.report([0xB0, PRESS, MM_MUTE], 51.2); assert mm_p.log[-1] == ("mute", 3)
+    w.report([0xB0, PRESS, MD_MUTE], 51.3); assert md_p.log[-1] == ("mute", 0)    # MD from MM
+    w.report([0xB0, KNOB0 + DATA_PAGE_KNOB, 64], 51.4); w.report([0xB0, KNOB0 + DATA_PAGE_KNOB, 72], 51.5)
+    assert mm_p.log[-1] == ("data_page", 1)
+    w.md["colours"] = ["yellow"] + [None] * 15
+    assert w.colors(0b1, 16, None, 52.0)[0] == YELLOW                              # note off
+    w.report([0xB0, PRESS, DRUM_BTN], 52.1); assert w.machine == "MD" and w.md["track"] == 0
+    assert w.colors(0b1, 16, None, 52.2)[0] == RED                                 # MD: lit = red
+    w.report([0x9F, 36 + 2, 90], 52.3); assert ("note_on", 64, 90) not in md_p.log  # MD pads
     print("all checks passed")
 
 
