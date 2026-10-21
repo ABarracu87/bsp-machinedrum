@@ -294,15 +294,15 @@ class Panel:
     def press(self, element):
         self.mcp.tool("click_element", id=element)
 
-    def mute(self, track):
-        """MM: its mute label toggles the track (light green <-> off, live 2026-10-21)."""
-        if self.machine == "MM":
-            self.press(f"trackMute{track}")
-            return True
-        self._key("altMute")            # MD: mute mode (FUNCTION combo); its 16 step lights are
-        self._key(f"trigKey{track}")    # the tracks, a trig key toggles one (live 2026-10-21)
-        self._key("btExit")
-        self.grid_rec()                 # EXIT left grid record off
+    def mute_window(self, on):
+        """The machine's mute window: its step lights show the tracks (lit = playing) and trig
+        key n toggles track n (MM manual p.67, FUNCTION + BANK; MD FUNCTION combo; live
+        2026-10-21). EXIT closes it."""
+        if on:
+            self._key("altMuteMode" if self.machine == "MM" else "altMute")
+        else:
+            self._key("btExit")
+            self.grid_rec()             # MD: EXIT left grid record off
         return True
 
     def page_count(self):

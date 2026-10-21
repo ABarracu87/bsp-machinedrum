@@ -33,7 +33,7 @@ LST_STEP, PREV, NEXT, CHAN = 0x55, 0x52, 0x53, 0x54   # CHAN: id seen live 2026-
 SHIFT = 0x56                  # press only, no release (live 2026-10-15)
 LFO_BTN = 0x1E                # right arrow above the drum channel button: MD LFO page on/off
 DRUM_BTN, SEQ1_BTN = 0x1A, 0x10   # machine select: DRUM = Machinedrum, SEQ1 = Monomachine
-MD_MUTE, MM_MUTE = 0x1C, 0x12     # mute/unmute that machine's selected track (2026-10-21)
+MD_MUTE, MM_MUTE = 0x1C, 0x12     # open/close that machine's mute window (2026-10-21)
 DATA_PAGE_KNOB = 7            # knob 8: data/parameter pages up/down (both machines)
 MM_CH = 8                     # Monomachine AUTO TRACK channel (0-based; manual default 9)
 OCTAVE = 4                    # MM pad keyboard start octave: C4 = note 60
@@ -166,7 +166,7 @@ class Surface:
         self.panels = panels or {"MD": panel}   # machine -> its Panel (None if not loaded)
         self.machine = next(m for m, p in self.panels.items() if p is panel)
         self.track_of = {"MD": 0, "MM": 0}      # each machine's selected track
-        self.muted = {"MD": set(), "MM": set()} # muted tracks (MM: read; MD: our own toggles)
+        self.mute_mode = None           # machine whose mute window is open: steps = tracks
         self.octave = OCTAVE
         self.mm_notes = {}              # pad -> MM note sounding (released on pad off)
         self.data_page_t = 0.0          # last knob-8 page step (one page per flick)
@@ -199,6 +199,9 @@ class Surface:
         if self.lock is not None:
             self.panel.release()
             self.lock = self.idle_since = None
+        if self.mute_mode:
+            self.panel.mute_window(False)
+            self.mute_mode = None
         for pad, n in self.mm_notes.items():
             self.panel.note_off(n)
         self.mm_notes.clear()
@@ -282,13 +285,16 @@ class Surface:
         elif cc == PRESS and v in (DRUM_BTN, SEQ1_BTN):
             self.switch("MD" if v == DRUM_BTN else "MM")
         elif cc == PRESS and v in (MD_MUTE, MM_MUTE):
-            m = "MD" if v == MD_MUTE else "MM"
-            t = self.md["track"] if m == self.machine else self.track_of[m]
-            if self.panels.get(m) is not None:
-                ok = self.panels[m].mute(t)
-                if ok:
-                    self.muted[m] ^= {t}            # MM: the reader corrects it from the lights
-                print(f"{m} mute track {t + 1}: {'ok' if ok else 'not available'}", flush=True)
+            m = "MD" if v == MD_MUTE else "MM"            # like the machine: a mute window,
+            if self.mute_mode == m:                       # steps toggle tracks (user 2026-10-21)
+                self.mute_mode = None
+                self.panel.mute_window(False)
+            else:
+                self.switch(m)                            # closes the other one's window
+                if self.machine == m:
+                    self.mute_mode = m
+                    self.panel.mute_window(True)
+            print(f"{m} mute window {'open' if self.mute_mode else 'closed'}", flush=True)
         elif cc == PRESS and v == LFO_BTN and self.machine == "MD":   # MD LFO page
             self.lfo = not self.lfo
             self.panel.press("altLfo" if self.lfo else "btExit")
@@ -312,6 +318,8 @@ class Surface:
         elif cc == PRESS and v == CHAN and not self.length_arm:   # MD SCALE: cycle the pages
             self.page = (self.page + 1) % max(1, self.md["pages"])
             self.panel.show_page(self.page)
+        elif cc == PRESS and STEP0 <= v < STEP0 + 16 and self.mute_mode:
+            self.panel.press(f"trigKey{v - STEP0}")       # mute window: toggle that track
         elif cc == PRESS and STEP0 <= v < STEP0 + 16 and self.length_arm:
             steps = self.page * 16 + v - STEP0 + 1           # inside the page shown
             self.length_arm = None
@@ -456,6 +464,8 @@ class Surface:
     def colors(self, trigs, length, play_step, now):
         """16 step colours: trigs of the shown page red (MM: its red/yellow/green), playhead
         white (user, 2026-10-21), p-locked step blinks."""
+        if self.mute_mode:                    # mute window: the machine's lights, lit = playing
+            return [RED if c else OFF for c in self.md.get("colours", [None] * 16)]
         if self.length_arm:                                   # choosing a length: show it
             page = self.page
             blink = int(now * 4) % 2
@@ -708,9 +718,7 @@ def run(*args):
                 now = time.time()
                 t_read = time.time()
                 machine = s.machine
-                _, bits, _, lit, dots, colours, muted = panel_frame(eyes[machine].mcp, machine)
-                if machine == "MM":
-                    s.muted["MM"] = set(muted)
+                _, bits, _, lit, dots, colours, _ = panel_frame(eyes[machine].mcp, machine)
                 if time.time() - t_read > STALL:            # hiccup diagnosis: slow MCP read
                     print(f"! slow MD read {1000 * (time.time() - t_read):.0f} ms", flush=True)
                 if machine != s.machine:
@@ -881,9 +889,8 @@ def run(*args):
                 if (send_led(button_led_msg(DRUM_BTN, s.machine == "MD"))   # LED ids = the
                         and send_led(button_led_msg(SEQ1_BTN, s.machine == "MM"))):  # button ids)
                     btn_shown[0] = s.machine
-            for b, m in ((MD_MUTE, "MD"), (MM_MUTE, "MM")):    # lit = that machine's
-                t = s.md["track"] if m == s.machine else s.track_of[m]   # selected track is muted
-                want = t in s.muted[m]
+            for b, m in ((MD_MUTE, "MD"), (MM_MUTE, "MM")):    # lit = its mute window open
+                want = s.mute_mode == m
                 if mute_shown[b] != want and send_led(button_led_msg(b, want)):
                     mute_shown[b] = want
             on = ((set(PAD_SEMI) | {PAD_OCT_DOWN, PAD_OCT_UP}) - set(s.mm_notes)   # MM: the
@@ -1037,8 +1044,6 @@ def test():
     assert m.trigs == m.known[(0, 0)] and m.trigs >> 4 & 1              # memory, not the trail
     # Monomachine mode (2026-10-21): SEQ1 / DRUM switch, pad keyboard, pitch entry, mutes
     md_p, mm_p = Fake(), Fake()
-    for f in (md_p, mm_p):
-        f.mute = lambda t, f=f: f.log.append(("mute", t)) or True
     w = Surface(md_p, panels={"MD": md_p, "MM": mm_p})
     w.report([0xB0, PRESS, SEQ1_BTN], 50.0); assert w.machine == "MM" and w.panel is mm_p
     w.report([0x9F, 36 + 2, 90], 50.1); assert mm_p.log[-1] == ("note_on", 64, 90)   # E4
@@ -1049,10 +1054,16 @@ def test():
     assert mm_p.log[-1] == ("select_track", 3) and w.track_of["MM"] == 3          # SHIFT+pad 4
     w.report([0xB0, PRESS, STEP0 + 5], 51.0); w.report([0x9F, 36 + 0, 90], 51.1)
     assert mm_p.log[-1] == ("pitch", 5, 72) and not w.holds                      # step 6 = C5
-    w.report([0xB0, PRESS, MM_MUTE], 51.2); assert mm_p.log[-1] == ("mute", 3)
-    assert 3 in w.muted["MM"]
-    w.report([0xB0, PRESS, MD_MUTE], 51.3); assert md_p.log[-1] == ("mute", 0)    # MD from MM
-    assert w.muted["MD"] == {0}
+    w.report([0xB0, PRESS, MM_MUTE], 51.2); assert mm_p.log[-1] == ("mute_window", True)
+    w.md["colours"] = ["red"] * 6 + [None] * 10
+    assert w.colors(0, 16, 3, 51.21)[:7] == [RED] * 6 + [OFF]                    # no playhead
+    w.report([0xB0, PRESS, STEP0 + 2], 51.22); assert mm_p.log[-1] == ("press", "trigKey2")
+    assert not w.holds                                                           # not a trig
+    w.report([0xB0, PRESS, MD_MUTE], 51.3)                                       # MD from MM:
+    assert ("mute_window", False) in mm_p.log and w.machine == "MD"              # MM's closes
+    assert md_p.log[-1] == ("mute_window", True) and w.mute_mode == "MD"
+    w.report([0xB0, PRESS, MD_MUTE], 51.31); assert w.mute_mode is None
+    w.report([0xB0, PRESS, SEQ1_BTN], 51.32); assert w.machine == "MM"
     w.report([0xB0, KNOB0 + DATA_PAGE_KNOB, 64], 51.4); w.report([0xB0, KNOB0 + DATA_PAGE_KNOB, 72], 51.5)
     assert mm_p.log[-1] == ("data_page", 1)
     w.md["colours"] = ["yellow"] + [None] * 15
