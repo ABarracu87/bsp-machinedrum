@@ -862,6 +862,21 @@ def run(*args):
             if now < reset["quiet_until"]:         # no LED writes right after a reset
                 time.sleep(0.002)
                 continue
+            s.page, view, head = md["frame"]       # the BSP shows the MD's page
+            step = s.page * 16 + head if playing and head is not None else None
+            cols = s.colors(view << 16 * s.page, L, step, now)
+            if (sum(c != shown[i] for i, c in enumerate(cols)) >= 8 and None not in shown
+                    and cols != big_redraw[0]):          # once per target, not per held-back pass
+                big_redraw[0] = cols
+                print("  big redraw (pattern/page change?)", flush=True)   # freeze diagnosis
+            order = sorted(range(16), key=lambda i: not (cols[i] == WHITE or shown[i] == WHITE))
+            for i in order:                        # playhead first, then trigs, then pads:
+                c = cols[i]                        # the limiter budget goes where it shows
+                if c != shown[i]:
+                    if not send_led(led_msg(i, c)):
+                        break                      # limited: the rest on a later pass
+                    shown[i] = c
+                    led_count += 1
             if btn_shown[0] != s.machine:          # DRUM / SEQ1 lit for the machine in use (the
                 if (send_led(button_led_msg(DRUM_BTN, s.machine == "MD"))   # LED ids = the
                         and send_led(button_led_msg(SEQ1_BTN, s.machine == "MM"))):  # button ids)
@@ -879,19 +894,6 @@ def run(*args):
                     if not send_led(pad_led_msg(i, i in on)):
                         break
                     pads_shown[i] = i in on
-                    led_count += 1
-            s.page, view, head = md["frame"]       # the BSP shows the MD's page
-            step = s.page * 16 + head if playing and head is not None else None
-            cols = s.colors(view << 16 * s.page, L, step, now)
-            if (sum(c != shown[i] for i, c in enumerate(cols)) >= 8 and None not in shown
-                    and cols != big_redraw[0]):          # once per target, not per held-back pass
-                big_redraw[0] = cols
-                print("  big redraw (pattern/page change?)", flush=True)   # freeze diagnosis
-            for i, c in enumerate(cols):
-                if c != shown[i]:
-                    if not send_led(led_msg(i, c)):
-                        break                      # limited: the rest on a later pass
-                    shown[i] = c
                     led_count += 1
             time.sleep(0.002)
     finally:
