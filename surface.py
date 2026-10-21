@@ -569,6 +569,7 @@ def run(*args):
         """SURFACE_CLOCK: Start + a steady clock; the BSP follows (Auto-sync) and passes
         the clock to Ableton, which clocks the MD."""
         if play:
+            ticks[0] = 0                    # MM playhead counts from Start
             send([0xFA])
             clock_on.set()
         else:
@@ -576,6 +577,7 @@ def run(*args):
             send([0xFC])
 
     clock_warned = [0.0]
+    ticks = [0]                         # clock ticks sent since Start (MM playhead)
 
     def clock():
         """24 clocks per beat at s.bpm: sleep to ~1 ms before the tick, then spin."""
@@ -589,6 +591,7 @@ def run(*args):
                 while time.perf_counter() < nxt:
                     pass
                 send([0xF8])
+                ticks[0] += 1
                 late = time.perf_counter() - nxt          # hiccup diagnosis; a knob reset
                 if late > STALL / 10 and time.time() - clock_warned[0] > 1.0:   # shows ~50 ms
                     clock_warned[0] = time.time()
@@ -686,6 +689,7 @@ def run(*args):
         p = panels[machine]
         if machine == "MM":
             md["mm_pages"] = p.page_count()
+            md["len"] = md["mm_pages"] * 16     # playhead wrap (length inside a page: later)
         p.grid_rec()
 
     def switched(machine):
@@ -712,7 +716,17 @@ def run(*args):
                 if machine != s.machine:
                     continue                # switched while reading: drop this frame
                 if machine == "MM":         # grid record: only the edited page's dot is lit
-                    page, md["pages"] = (min(dots) if dots else 0), md.get("mm_pages", 1)
+                    page = min(dots) if dots else md["frame"][0]   # (dark while it flashes)
+                    md["pages"] = md.get("mm_pages", 1)
+                    md["track"] = pick_track(md["track"], lit)
+                    md["tracks_lit"], md["colours"] = lit, colours
+                    head = None             # its step lights never show the playhead
+                    if md["playing"] and s.running:   # (live 2026-10-21): count our clock
+                        pos = ticks[0] // 6 % max(1, md["len"] or 16)
+                        head = pos % 16 if pos // 16 == page else None
+                    md["frame"] = (page, bits, head)
+                    time.sleep(MIRROR_PERIOD if md["playing"] else IDLE_PERIOD)
+                    continue
                 else:
                     page, md["pages"] = md["dots"].feed(now, dots, md["playing"])
                 md["track"] = pick_track(md["track"], lit)
@@ -857,7 +871,8 @@ def run(*args):
                 want = t in s.muted[m]
                 if mute_shown[b] != want and send_led(button_led_msg(b, want)):
                     mute_shown[b] = want
-            on = (set(s.mm_notes) if s.machine == "MM"           # MM: the pads played
+            on = ((set(PAD_SEMI) | {PAD_OCT_DOWN, PAD_OCT_UP}) - set(s.mm_notes)   # MM: the
+                  if s.machine == "MM"                     # keyboard lit, a held pad dark
                   else {track_pad(t) for t in md["tracks_lit"]}) # MD: its track lights
             for i in range(16):
                 if (i in on) != pads_shown[i]:
