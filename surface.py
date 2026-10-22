@@ -73,6 +73,8 @@ RESET_PRE_QUIET = 0.15        # s without LED writes BEFORE a knob reset
 RESET_IDLE = 0.3              # s with no knob report before a knob reset
 RESET_MIN_GAP = 0.6           # s between knob resets (stress-tested spacing: 0.5 s)
 RESET_QUIET = 0.25            # s without LED writes after a knob reset (reset_stress.py)
+TOUCH_HOLD = 5.0              # s a knob touch counts without its release (a lost release
+                              # must not block resets for good)
 RESET_HUSH = 0.025            # s without clock ticks either side of a knob reset (reset_stress.py)
 TEMPO_KNOB = 0x66             # report CC of the big TEMPO encoder (encoder 16)
 class Mirror:
@@ -132,8 +134,11 @@ def pad_to_track(ch, note):
 KNOB_RESET = [0xF0, 0, 0x20, 0x6B, 0x7F, 0x42, 0x02, 0x7D, 0x7D, 0x09, 0x7F, 0xF7]
 
 
+REPORT_ON = [0xF0, 0, 0x20, 0x6B, 0x7F, 0x42, 0x02, 0x00, 0x41, REPORT, 2, 0xF7]
+
+
 def report_mode(mo, on):
-    mo.send_message([0xF0, 0, 0x20, 0x6B, 0x7F, 0x42, 0x02, 0x00, 0x41, REPORT, 2 if on else 0, 0xF7])
+    mo.send_message(REPORT_ON[:10] + [2 if on else 0, 0xF7])
 
 
 def pad_led_msg(pad, on):
@@ -183,6 +188,7 @@ class Surface:
         self.length_arm = None          # time of LST STEP: the next step sets the length
         self.shift_at = -1e9            # last SHIFT (or shifted arrow): no releases reported
         self.last_knob = 0.0            # time of the last knob report
+        self.odd_at = 0.0               # last unexpected-input log line
         self.knob_t = {}                # knob -> time of its last report (acceleration)
         self.lfo = False                # LFO page opened from the BSP
         self.running = False            # our transport (the BSP ignores Start/Stop in report mode)
@@ -277,6 +283,7 @@ class Surface:
                       flush=True)
             return
         if st != 0xB0:
+            self.odd(msg)
             return
         if cc == PRESS and not KNOB0 <= v < KNOB0 + 16:
             print(f"press id {v:#04x}", flush=True)
@@ -351,7 +358,15 @@ class Surface:
                 print(f"tempo {self.bpm:.0f} BPM", flush=True)
             if v in (0, 127) and self.recenter(None):
                 self.knobs_at_64()
-        # knob touch reports (CC 1/3, id 0x20-0x2F) are ignored: knob 1's sensor fires non-stop
+        elif cc not in (PRESS, RELEASE):      # knob touch/release: run() gates resets on them
+            self.odd(msg)
+
+    def odd(self, msg):
+        """Input the surface does not expect: logged (once a second), so a stuck BSP shows
+        what it sends instead (normal-mode CCs would mean report mode dropped)."""
+        if time.time() - self.odd_at > 1.0:
+            self.odd_at = time.time()
+            print(f"? unexpected MIDI from the BSP: {' '.join(f'{x:02X}' for x in msg)}", flush=True)
 
     def knobs_at_64(self):
         """The knob reset moves every knob counter (and TEMPO) to 64."""
@@ -617,6 +632,42 @@ def run(*args):
     QUERY = [0xF0, 0, 0x20, 0x6B, 0x7F, 0x42, 0x01, 0x00, 0x41, REPORT, 0xF7]
     REPLY = [0xF0, 0, 0x20, 0x6B, 0x7F, 0x42, 0x02, 0x00, 0x41, REPORT]
 
+    touched = {}                        # knob id -> time touched, until its release
+
+    def hands_on(now):
+        """A hand on a knob (touch CC1 id .. release CC3 id; knob 1's sensor fires non-stop,
+        so not knob 1). A reset while a knob moves is the one pattern every freeze shared."""
+        return any(now - t < TOUCH_HOLD for t in touched.values())
+
+    def redraw():
+        shown[:] = [None] * 16
+        pads_shown[:] = [None] * 16     # (a reset once left a pad lit)
+        btn_shown[0] = None
+        mute_shown.update(dict.fromkeys(mute_shown))
+
+    def drain(now):
+        """BSP input: probe replies, its clock, touches; the rest to the worker."""
+        nonlocal clocks, last_clock
+        while (m := mi.get_message()):
+            b = m[0]
+            if b[:10] == REPLY:
+                probe["at"] = probe["sent"] = None     # it answered: alive
+                if len(b) > 11 and b[10] == 0:         # ...but out of report mode: its
+                    print("! BSP left report mode: switching it back on", flush=True)
+                    send(REPORT_ON)                    # lights and controls are its own
+                    redraw()
+                continue
+            if b[0] == 0xF8:
+                clocks += 1                    # the BSP's clock: playing or not
+                last_clock = now
+            elif b[0] & 0xF0 in (0x80, 0x90, 0xA0, 0xB0) and len(b) > 2:
+                if b[0] == 0xB0 and b[1] in (PRESS, RELEASE) and KNOB0 + 1 <= b[2] < KNOB0 + 16:
+                    if b[1] == PRESS:
+                        touched[b[2]] = now
+                    else:
+                        touched.pop(b[2], None)
+                inbox.put((b, now))            # MD actions run on the worker
+
     def reconnect():
         """After a power cycle: reopen the BSP ports, and if it answers, set it up again."""
         import rtmidi
@@ -639,10 +690,7 @@ def run(*args):
         time.sleep(RESET_QUIET)
         mo.send_message([0xFC])             # Stop through the BSP: Ableton (and the MD) kept
         reset["quiet_until"] = time.time() + RESET_QUIET   # running alone while it was gone
-        shown[:] = [None] * 16
-        pads_shown[:] = [None] * 16
-        btn_shown[0] = None
-        mute_shown.update(dict.fromkeys(mute_shown))
+        redraw()
         s.knobs_at_64()
         return True
 
@@ -663,6 +711,10 @@ def run(*args):
         reset["quiet_until"] = time.time() + 10      # no new LED writes from now on, and
         while led_sent and time.time() - led_sent[-1] < RESET_PRE_QUIET:   # none in the
             time.sleep(0.005)                        # last RESET_PRE_QUIET s before it
+        drain(time.time())                           # last look: a hand arrived meanwhile?
+        if hands_on(time.time()):
+            reset["pending"], reset["quiet_until"] = True, 0.0     # later, hands off
+            return False
         with out:                       # the clock thread waits on this lock
             time.sleep(RESET_HUSH)
             mo.send_message(off + KNOB_RESET)   # one packet: no normal-mode frame between
@@ -670,10 +722,7 @@ def run(*args):
             reset["quiet_until"] = time.time() + RESET_QUIET
             reset["last"] = time.time()
             probe["at"] = reset["last"] + RESET_QUIET + 0.35    # does it still answer?
-        shown[:] = [None] * 16          # redraw the step LEDs after the quiet time
-        pads_shown[:] = [None] * 16     # and the pads (a reset once left one lit)
-        btn_shown[0] = None
-        mute_shown.update(dict.fromkeys(mute_shown))
+        redraw()                        # after the quiet time
         return True
 
     s = Surface(panel, bsp_send=surface_transport if SURFACE_CLOCK else bsp_transport,
@@ -834,23 +883,14 @@ def run(*args):
             if probe["sent"] and now - probe["sent"] > 0.5:
                 probe["at"] = probe["sent"] = None
                 probe["frozen"] = True
-                print("! BSP FROZEN: it stopped answering after a knob reset. Power-cycle the "
+                print("! BSP FROZEN: it stopped answering. Power-cycle the "
                       "BeatStep Pro (unplug USB or switch it off and on); the app reconnects by "
                       "itself.", flush=True)
                 if s.running:
                     s.running = False
                     surface_transport(False)       # stop the clock: the BSP is gone
                 continue
-            while (m := mi.get_message()):
-                b = m[0]
-                if b[:10] == REPLY:
-                    probe["at"] = probe["sent"] = None     # it answered: alive
-                    continue
-                if b[0] == 0xF8:
-                    clocks += 1                    # the BSP's clock: playing or not
-                    last_clock = now
-                elif b[0] & 0xF0 in (0x80, 0x90, 0xA0, 0xB0) and len(b) > 2:
-                    inbox.put((b, now))            # MD actions run on the worker
+            drain(now)
             playing = now - last_clock < 0.2   # clock running = playing (either master)
             md["playing"] = now - last_clock < 1.0    # + 1 s to settle after STOP
             if now - last_status > 2:              # debug: playhead inputs
@@ -864,7 +904,8 @@ def run(*args):
             if (L + 15) // 16 != md["pages"]:      # when they disagree (stale RAM copy)
                 L = md["pages"] * 16
             if (reset["pending"] and now - reset["last"] >= RESET_MIN_GAP
-                    and now - s.last_knob >= RESET_IDLE and recenter("now")):
+                    and now - s.last_knob >= RESET_IDLE and not hands_on(now)
+                    and recenter("now")):
                 s.knobs_at_64()                    # knob reset, done here only (one thread)
                 print(f"  knobs recentred {time.strftime('%H:%M:%S')}", flush=True)
             if now < reset["quiet_until"]:         # no LED writes right after a reset
