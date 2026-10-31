@@ -65,6 +65,7 @@ else:
 # to the app the user ticked, not to the surface process the app starts, so a Shift posted
 # by the surface was dropped and p-locks became plain taps. The window serves a one-byte
 # protocol on 127.0.0.1 (port in BSPM_KEYS_PORT): b"1"/b"0" = Shift down/up, b"?" = trusted?
+# Replies are one line: "k" done, "y"/"n" trusted, "e <error>" failed.
 import os, socket, threading
 
 _direct_shift, _direct_can = shift, can_hold_keys
@@ -77,15 +78,22 @@ def serve():
     srv.listen(1)
 
     def run():
-        while True:
-            conn, _ = srv.accept()
+        while True:                   # an error must not end the server: it once died and
+            conn, _ = srv.accept()    # every later key-up was a BrokenPipe (2026-10-31)
             with conn:
-                while (b := conn.recv(1)):
-                    if b == b"?":
-                        conn.sendall(b"y" if _direct_can() else b"n")
-                    else:
-                        _direct_shift(b == b"1")
-                        conn.sendall(b"k")       # the key is down/up: the click may follow
+                try:
+                    while (b := conn.recv(1)):
+                        try:
+                            if b == b"?":
+                                reply = b"y" if _direct_can() else b"n"
+                            else:
+                                _direct_shift(b == b"1")
+                                reply = b"k"     # the key is down/up: the click may follow
+                        except Exception as e:
+                            reply = b"e " + repr(e).encode()[:200]
+                        conn.sendall(reply + b"\n")
+                except OSError:
+                    pass                # client gone: accept the next one
     threading.Thread(target=run, daemon=True).start()
     return srv.getsockname()[1]
 
@@ -94,11 +102,25 @@ if os.environ.get("BSPM_KEYS_PORT"):              # surface started by the windo
     _conn = None
 
     def _ask(cmd):
+        """-> the window's reply line; one reconnect if the connection dropped."""
         global _conn
-        if _conn is None:
-            _conn = socket.create_connection(("127.0.0.1", int(os.environ["BSPM_KEYS_PORT"])), 2)
-        _conn.sendall(cmd)
-        return _conn.recv(1)
+        for attempt in (0, 1):
+            try:
+                if _conn is None:
+                    _conn = socket.create_connection(
+                        ("127.0.0.1", int(os.environ["BSPM_KEYS_PORT"])), 2).makefile("rwb", 0)
+                _conn.write(cmd)
+                reply = _conn.readline().rstrip()
+                if not reply:
+                    raise ConnectionError("key server closed the connection")
+                break
+            except (OSError, ValueError):     # ValueError: our side closed
+                _conn = None
+                if attempt:
+                    raise
+        if reply.startswith(b"e "):
+            raise RuntimeError(f"app window could not post the Shift key: {reply[2:].decode()}")
+        return reply
 
     def shift(down):
         _ask(b"1" if down else b"0")

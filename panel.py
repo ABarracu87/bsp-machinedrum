@@ -603,8 +603,8 @@ class Panel:
 
     def release(self):
         if self.held is not None:
-            keys.shift(False)
-            self.held = None
+            self.held = None            # first: a failed key-up must not repeat forever
+            keys.shift(False)           # (BrokenPipe 50x/s, 2026-10-31)
 
     def watchdog(self):
         if self.held is not None and time.time() - self.held_at > HOLD_TIMEOUT:
