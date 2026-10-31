@@ -593,7 +593,7 @@ class Panel:
         """Hold a trig. Needs the real Shift key and Ableton in front (plugin checks both)."""
         if self.held == step:
             return True
-        if frontmost_pid() != find_port()[1]:       # re-read: Ableton may have restarted
+        if frontmost_pid() != find_port(self.prof["plugin"])[1]:   # re-read: Live may have restarted
             print("! bring Ableton to the front to make p-locks (not holding)")
             return False
         keys.shift(True)
