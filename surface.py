@@ -199,9 +199,8 @@ class Surface:
         """DRUM / SEQ1: the BSP drives the other machine. Holds, locks and the view reset."""
         if machine == self.machine:
             return
-        if self.panels.get(machine) is None:
-            print(f"! {machine}: plugin not loaded (or its MCP server is off)", flush=True)
-            return
+        if self.panels.get(machine) is None and not self.connect(machine):
+            return                      # (loaded after Start: looked up again on its button)
         if self.lock is not None:
             self.panel.release()
             self.lock = self.idle_since = None
@@ -219,6 +218,11 @@ class Surface:
                        tracks_lit=[], colours=[None] * 16)
         print(f"machine -> {machine}", flush=True)
         self.on_switch(machine)
+
+    def connect(self, machine):
+        """run() looks the plugin up again here. -> True when found."""
+        print(f"! {machine}: plugin not loaded (or its MCP server is off)", flush=True)
+        return False
 
     def on_switch(self, machine):
         """run() hooks the reader/lights here."""
@@ -751,6 +755,18 @@ def run(*args):
             md["len"] = md["mm_pages"] * 16     # playhead wrap (length inside a page: later)
         p.grid_rec()
 
+    def connect(m):
+        try:
+            panels[m], eyes[m] = Panel(m), Panel(m)
+        except Exception as e:
+            print(f"! {m} plugin not found ({e}): open its window, MCP server on", flush=True)
+            return False
+        panels[m].shown_page = lambda: md["frame"][0]
+        print(f"{m} plugin found", flush=True)
+        return True
+
+    s.connect = connect
+
     def switched(machine):
         mirror_box["mirror"] = Mirror()
         md["dots"] = PageDots()
@@ -761,7 +777,7 @@ def run(*args):
     s.on_switch = switched
 
     def reader():                       # MD -> BSP: panel 50 Hz playing / 10 Hz stopped
-        last_ram = 0.0
+        last_ram, last_err = 0.0, [None, 0.0]
         while True:
             try:
                 now = time.time()
@@ -799,7 +815,10 @@ def run(*args):
                     md["len"] = length(None, ram)   # length only; the setters update it too
             except Exception as e:      # a timed-out read must not kill the lights
                 where = traceback.extract_tb(e.__traceback__)[-1]
-                print(f"! MD read failed: {e!r} ({where.name}:{where.lineno})", flush=True)
+                msg = f"! {s.machine} read failed: {e!r} ({where.name}:{where.lineno})"
+                if msg != last_err[0] or time.time() - last_err[1] > 10:   # once, not 50/s
+                    print(msg, flush=True)
+                    last_err[:] = [msg, time.time()]
             time.sleep(MIRROR_PERIOD if md["playing"] else IDLE_PERIOD)
 
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
@@ -1112,6 +1131,9 @@ def test():
     w.report([0xB0, PRESS, DRUM_BTN], 52.1); assert w.machine == "MD" and w.md["track"] == 0
     assert w.colors(0b1, 16, None, 52.2)[0] == RED                                 # MD: lit = red
     w.report([0x9F, 36 + 2, 90], 52.3); assert ("note_on", 64, 90) not in md_p.log  # MD pads
+    late = Surface(md_p, panels={"MD": md_p, "MM": None})          # MM loaded after Start:
+    late.connect = lambda m: late.panels.update(MM=mm_p) or True   # found on its button
+    late.report([0xB0, PRESS, SEQ1_BTN], 53.0); assert late.machine == "MM" and late.panel is mm_p
     print("all checks passed")
 
 
