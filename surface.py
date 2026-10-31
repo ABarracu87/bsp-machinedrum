@@ -521,7 +521,12 @@ def run(*args):
     from mdmm_bsp import bsp_get, bsp_set, is_bsp_port
     import keys
     keys.no_app_nap()                   # the clock must not be throttled in the background
-    if not keys.can_hold_keys():
+    try:
+        trusted = keys.can_hold_keys()
+    except Exception as e:              # a broken check must not stop the surface
+        print(f"! Accessibility check failed: {e}", flush=True)
+        trusted = True                  # unknown: the p-lock itself will tell
+    if not trusted:
         print("! No Accessibility permission: p-locks will NOT work (macOS drops the Shift key). "
               "System Settings > Privacy & Security > Accessibility: remove 'BSP Machinedrum', "
               "add it again, switch it on, restart the app.", flush=True)
