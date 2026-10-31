@@ -21,6 +21,11 @@ sequencer plays; the lights mirror the MD's panel, read over the plugin's MCP se
   SHIFT, then << >>        pattern length: a page less/more (16-64)
   LST STEP, then a step    last step, inside the page shown (the total stays)
   REC / PLAY / STOP        MD RECORD, start/stop the clock
+  knob 8                   parameter page down/up (MD SYN/FX/ROUT, MM DATA PAGE)
+  DRUM / SEQ1              drive the Machinedrum / the Monomachine
+  MD / MM mute button      that machine's mute window: steps toggle tracks; again = close
+  MM: pads                 one-octave keyboard (top-row pads 7/8 = octave -/+)
+  MM: step, then a pad     that trig's note       SHIFT, then pads 1-6: MM track
 """
 import _thread, queue, signal, sys, threading, time, traceback
 
