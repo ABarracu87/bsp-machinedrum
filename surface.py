@@ -54,6 +54,7 @@ KNOB0 = 0x20                  # knob k (0-15) turns = CC 0x20+k, touch id = 0x20
 KNOB_STEP = 8                 # report values per detent (acceleration setting does not change it)
 FINE = 0.5                    # wheel per report: 0.5 = ~1 MD step (1.0 trips the plugin's wheel accel)
 TAP_WAIT = 0.5                # a step tap waits this long for a knob touch (= p-lock)
+PITCH_WAIT = 2.0              # s after a step tap a MM pad still sets that step's pitch
 KNOB_IDLE = 6.0               # a p-lock ends this long after the last knob turn (user: 2.5 s
                               # expired too soon, 2026-10-17); a step press ends it at once
 KNOB_ACCEL = ((0.03, 4), (0.06, 2))   # (s between reports, x) fast turns move further
@@ -247,10 +248,15 @@ class Surface:
         if pad not in PAD_SEMI:
             return
         note = 12 * (self.octave + 1) + PAD_SEMI[pad]
+        # step then pad: the step's pitch. Also after the tap went out (a pad later than
+        # TAP_WAIT played live and the tap had removed the trig, 2026-11-01): holding the
+        # step + key leaves a trig with that pitch either way
         recent = [(st, pg) for st, (t, pg) in self.holds.items() if now - t < TAP_WAIT]
-        if recent:                                 # step then pad: the step's pitch
+        recent += [(st, pg) for st, (t, pg) in self.auto.items() if now - t < PITCH_WAIT]
+        if recent:
             for st, pg in recent:
-                del self.holds[st]
+                self.holds.pop(st, None)
+                self.auto.pop(st, None)
                 self.toggled.pop(pg * 16 + st, None)
                 if pg == self.page:
                     ok = self.panel.pitch(st, note)
@@ -1124,6 +1130,10 @@ def test():
     assert mm_p.log[-1] == ("select_track", 3) and w.track_of["MM"] == 3          # SHIFT+pad 4
     w.report([0xB0, PRESS, STEP0 + 5], 51.0); w.report([0x9F, 36 + 0, 90], 51.1)
     assert mm_p.log[-1] == ("pitch", 5, 72) and not w.holds                      # step 6 = C5
+    w.report([0xB0, PRESS, STEP0 + 7], 51.12); w.tick(51.7)
+    assert mm_p.log[-1] == ("tap", 7)                                            # tapped...
+    w.report([0x9F, 36 + 0, 90], 52.5); assert mm_p.log[-1] == ("pitch", 7, 72)   # ...pad late
+    w.report([0x9F, 36 + 0, 90], 54.0); assert mm_p.log[-1] == ("note_on", 72, 90)  # live again
     w.report([0xB0, PRESS, MM_MUTE], 51.2); assert mm_p.log[-1] == ("mute_window", True)
     w.md["colours"] = ["red"] * 6 + [None] * 10
     assert w.colors(0, 16, 3, 51.21)[:7] == [RED] * 6 + [OFF]                    # no playhead

@@ -128,6 +128,11 @@ class App:
                     self.root.bell()
                 elif line.startswith("BSP back"):
                     self.alarm.config(text="")
+                elif line.startswith("! bring Ableton"):   # easy to miss in the log (2026-11-01)
+                    self.alarm.config(text="Click into Ableton: p-locks and MM step notes\n"
+                                           "need Live in front.")
+                    self.root.after(4000, lambda: self.alarm.config(text="")
+                                    if self.alarm.cget("text").startswith("Click") else None)
                 self.add_log(line)
         self.root.after(100, self.pump)
 
