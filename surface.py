@@ -25,7 +25,7 @@ sequencer plays; the lights mirror the MD's panel, read over the plugin's MCP se
   DRUM / SEQ1              drive the Machinedrum / the Monomachine
   MD / MM mute button      that machine's mute window: steps toggle tracks; again = close
   MM: pads                 one-octave keyboard (top-row pads 7/8 = octave -/+)
-  MM: step, then a pad     that trig's note       SHIFT, then pads 1-6: MM track
+  MM: hold step + knob 5/6 that trig's note (mini keyboard arrows)   SHIFT, then pads 1-6: MM track
 """
 import _thread, queue, signal, sys, threading, time, traceback
 
@@ -54,7 +54,6 @@ KNOB0 = 0x20                  # knob k (0-15) turns = CC 0x20+k, touch id = 0x20
 KNOB_STEP = 8                 # report values per detent (acceleration setting does not change it)
 FINE = 0.5                    # wheel per report: 0.5 = ~1 MD step (1.0 trips the plugin's wheel accel)
 TAP_WAIT = 0.5                # a step tap waits this long for a knob touch (= p-lock)
-PITCH_WAIT = 2.0              # s after a step tap a MM pad still sets that step's pitch
 KNOB_IDLE = 6.0               # a p-lock ends this long after the last knob turn (user: 2.5 s
                               # expired too soon, 2026-10-17); a step press ends it at once
 KNOB_ACCEL = ((0.03, 4), (0.06, 2))   # (s between reports, x) fast turns move further
@@ -66,6 +65,8 @@ RAM_PERIOD = 1.0              # MD RAM reads, for the length only (the server ig
 OFF, RED, GREEN, YELLOW, WHITE = 0x00, 0x01, 0x04, 0x05, 0x15   # step LED: 2 bits each R, G, B
 MM_COLOUR = {"red": RED, "yellow": YELLOW, "green": GREEN}       # MM trig light classes
 SPECIAL = {6: "encLevel", 15: "encSound"}
+ARROWS = {4: ("btLeft", "btRight"), 5: ("btDown", "btUp")}   # MM knobs 5 / 6: arrow keys; with a
+                              # step held they pick its note (manual: hold [TRIG] + [ARROW]; user 2026-11-01)
 
 
 SURFACE_CLOCK = True          # True: the surface is the master clock (BSP follows via Auto-sync,
@@ -73,8 +74,9 @@ SURFACE_CLOCK = True          # True: the surface is the master clock (BSP follo
                               # False: the BSP is master (Auto-sync clock burst, fixed tempo).
 TEMPO = 120.0                 # start tempo (surface clock); surface.py run <bpm>
 STALL = 0.15                  # s: log a read or light-loop gap longer than this (hiccups)
-LED_GAP, LED_CAP, LED_WINDOW = 0.004, 10, 0.1   # LED writes to the BSP: >= 4 ms apart, <= 10
-                              # per 100 ms (user: limit what we send back at once, 2026-10-17)
+LED_GAP, LED_CAP, LED_WINDOW = 0.006, 8, 0.1    # hard limit on everything sent to the BSP but
+                              # the clock (LEDs, SysEx): >= 6 ms apart, <= 8 per 100 ms (user:
+                              # limit what we send back at once, 2026-10-17; hard limit, 2026-11-01)
 RESET_PRE_QUIET = 0.15        # s without LED writes BEFORE a knob reset
 RESET_IDLE = 0.3              # s with no knob report before a knob reset
 RESET_MIN_GAP = 0.6           # s between knob resets (stress-tested spacing: 0.5 s)
@@ -83,6 +85,24 @@ TOUCH_HOLD = 5.0              # s a knob touch counts without its release (a los
                               # must not block resets for good)
 RESET_HUSH = 0.025            # s without clock ticks either side of a knob reset (reset_stress.py)
 TEMPO_KNOB = 0x66             # report CC of the big TEMPO encoder (encoder 16)
+def room(sent, now):
+    """Room for one more non-clock BSP write? `sent` = times of the recent ones (trimmed)."""
+    del sent[:-LED_CAP]
+    return not ((sent and now - sent[-1] < LED_GAP)
+                or (len(sent) == LED_CAP and now - sent[0] < LED_WINDOW))
+
+
+def merge_turns(inbox, b, t):
+    """A backlog of one knob's turns -> its newest report (the counter is absolute, so the
+    turn is summed, not lost): the plugin actions stay under the MCP limit (2026-11-01)."""
+    while b[0] == 0xB0 and KNOB0 <= b[1] < KNOB0 + 16:
+        with inbox.mutex:
+            if not inbox.queue or inbox.queue[0][0][:2] != b[:2]:
+                break
+            b, t = inbox.queue.popleft()
+    return b, t
+
+
 class Mirror:
     """MD panel step LEDs -> stable trigs + the MD's playhead (live 2026-10-14).
     Stopped, the LEDs are exactly the trigs of the shown page. Playing, the MD flips the
@@ -234,8 +254,8 @@ class Surface:
         """run() hooks the reader/lights here."""
 
     def mm_pad(self, pad, velocity, now):
-        """Monomachine pad keyboard: octave pads, SHIFT + pad 1-6 = track, a pad just after a
-        step = that step's pitch (hold TRIG + key), else play the note live."""
+        """Monomachine pad keyboard: octave pads, SHIFT + pad 1-6 = track,
+        else play the note live."""
         if pad == PAD_OCT_DOWN or pad == PAD_OCT_UP:
             self.octave = max(0, min(8, self.octave + (1 if pad == PAD_OCT_UP else -1)))
             print(f"MM octave {self.octave}", flush=True)
@@ -248,20 +268,6 @@ class Surface:
         if pad not in PAD_SEMI:
             return
         note = 12 * (self.octave + 1) + PAD_SEMI[pad]
-        # step then pad: the step's pitch. Also after the tap went out (a pad later than
-        # TAP_WAIT played live and the tap had removed the trig, 2026-11-01): holding the
-        # step + key leaves a trig with that pitch either way
-        recent = [(st, pg) for st, (t, pg) in self.holds.items() if now - t < TAP_WAIT]
-        recent += [(st, pg) for st, (t, pg) in self.auto.items() if now - t < PITCH_WAIT]
-        if recent:
-            for st, pg in recent:
-                self.holds.pop(st, None)
-                self.auto.pop(st, None)
-                self.toggled.pop(pg * 16 + st, None)
-                if pg == self.page:
-                    ok = self.panel.pitch(st, note)
-                    print(f"MM step {pg * 16 + st + 1} pitch {note}: {'ok' if ok else 'FAILED'}", flush=True)
-            return
         self.mm_notes[pad] = note
         self.panel.note_on(note, velocity)
 
@@ -392,6 +398,8 @@ class Surface:
         self.last_knob = time.time()            # knob motion: resets wait for a pause
         dt, self.knob_t[k] = now - self.knob_t.get(k, -1e9), now
         accel = next((x for limit, x in KNOB_ACCEL if 0 <= dt < limit), 1)
+        if self.machine == "MM" and k in ARROWS:
+            accel = 1                                         # notes: one key per click
         last, self.knob_val[k] = self.knob_val.get(k), v
         print(f"knob {k + 1}: {last} -> {v}", flush=True)
         if last is None and v in (0, 127):
@@ -404,7 +412,7 @@ class Surface:
         if self.holds:
             for st, (_, page) in self.holds.items():      # a p-lock, not a tap: undo the light
                 self.toggled.pop(page * 16 + st, None)
-            if block == "L" or k in SPECIAL:
+            if self.assigned(k, block):
                 self.lock_steps(sorted(self.holds), block, slot, k, detents, now)
                 self.holds.clear()
             else:
@@ -416,7 +424,7 @@ class Surface:
                 print(f"  knob {k + 1} at {v}: recentred {time.strftime('%H:%M:%S')}", flush=True)
             return                            # holds consumed: no extra plain turn
         recent = [s for s, (t, _) in self.auto.items() if now - t < 2.0]
-        if len(recent) == 1 and (block == "L" or k in SPECIAL):
+        if len(recent) == 1 and self.assigned(k, block):
             self.tap(recent[0], self.auto[recent[0]][1])  # undo the timeout-tap
             del self.auto[recent[0]]
             self.lock_steps([recent[0]], block, slot, k, detents, now)
@@ -441,8 +449,11 @@ class Surface:
                 t = max(0, min(5, self.md["track"] + (1 if detents > 0 else -1)))
                 self.md["track"] = self.track_of["MM"] = t
                 self.panel.select_track(t)
-        elif k in SPECIAL:
-            self.panel.turn(SPECIAL[k], detents)
+        elif self.assigned(k, block):
+            self.turn_locked(block, slot, k, detents)
+
+    def assigned(self, k, block):
+        return block == "L" or k in SPECIAL or (self.machine == "MM" and k in ARROWS)
 
     def lock_steps(self, steps, block, slot, k, detents, now):
         """One step: hold across turns (released at idle). Several: hold each,
@@ -464,6 +475,9 @@ class Surface:
     def turn_locked(self, block, slot, k, detents):
         if block == "L":
             self.panel.encoder(slot, detents)
+        elif k in ARROWS:                         # one arrow press per click (x accel)
+            for _ in range(max(1, round(abs(detents) / FINE))):
+                self.panel.press(ARROWS[k][detents > 0])
         else:
             self.panel.turn(SPECIAL[k], detents)
 
@@ -554,11 +568,25 @@ def run(*args):
     mi.ignore_types(sysex=False, timing=False, active_sense=True)   # SysEx: freeze probe replies
     out = threading.Lock()
 
-    def send(msg):
-        with out:
-            mo.send_message(msg)
+    led_sent = []                       # times of recent non-clock writes (the limiter)
 
-    led_sent = []                       # times of recent LED writes (the limiter)
+    def budget(now):
+        return room(led_sent, now)
+
+    def send(msg):
+        """The clock goes at once; anything else waits for the budget (not under the lock:
+        the clock thread needs it meanwhile)."""
+        while True:
+            with out:
+                now = time.time()
+                if msg[0] in (0xF8, 0xFA, 0xFC):
+                    mo.send_message(msg)
+                    return
+                if budget(now):
+                    mo.send_message(msg)
+                    led_sent.append(now)
+                    return
+            time.sleep(0.002)
 
     def send_led(msg):
         """An LED write, rate-limited and checked against the reset quiet time UNDER the
@@ -567,9 +595,7 @@ def run(*args):
         -> False when held back (the loop redraws it on a later pass)."""
         with out:
             now = time.time()
-            del led_sent[:-LED_CAP]
-            if (now < reset["quiet_until"] or (led_sent and now - led_sent[-1] < LED_GAP)
-                    or (len(led_sent) == LED_CAP and now - led_sent[0] < LED_WINDOW)):
+            if now < reset["quiet_until"] or not budget(now):
                 return False
             mo.send_message(msg)
             led_sent.append(now)
@@ -738,6 +764,7 @@ def run(*args):
         with out:                       # the clock thread waits on this lock
             time.sleep(RESET_HUSH)
             mo.send_message(off + KNOB_RESET)   # one packet: no normal-mode frame between
+            led_sent.append(time.time())        # counts against the budget too
             time.sleep(RESET_HUSH)
             reset["quiet_until"] = time.time() + RESET_QUIET
             reset["last"] = time.time()
@@ -875,6 +902,7 @@ def run(*args):
         while True:
             try:
                 b, t = inbox.get(timeout=0.005)
+                b, t = merge_turns(inbox, b, t)
                 s.report(b, t)
             except queue.Empty:
                 pass
@@ -1118,6 +1146,17 @@ def test():
     m.update(0b1111, (0, 1), True, 2.0, 0.125)                          # page 2, unseen: LEDs
     m.update(0b1110000, (0, 0), True, 2.1, 0.125)                       # back to page 1 mid-play:
     assert m.trigs == m.known[(0, 0)] and m.trigs >> 4 & 1              # memory, not the trail
+    sent, t, n = [], 0.0, 0                                              # BSP budget: 1 s of
+    while t < 1.0:                                                       # writes as fast as
+        if room(sent, t):                                                # allowed
+            sent.append(t); n += 1
+        t += 0.001
+    assert 75 <= n <= 80, n                                              # <= 8 per 100 ms
+    box = queue.Queue()                                                  # turn backlog merge
+    for m in ([0xB0, KNOB0 + 2, 72], [0xB0, KNOB0 + 2, 80], [0xB0, KNOB0 + 3, 72], [0xB0, KNOB0 + 3, 80]):
+        box.put((m, 0.0))
+    assert merge_turns(box, *box.get())[0] == [0xB0, KNOB0 + 2, 80]
+    assert merge_turns(box, *box.get())[0] == [0xB0, KNOB0 + 3, 80] and box.empty()
     # Monomachine mode (2026-10-21): SEQ1 / DRUM switch, pad keyboard, pitch entry, mutes
     md_p, mm_p = Fake(), Fake()
     w = Surface(md_p, panels={"MD": md_p, "MM": mm_p})
@@ -1128,12 +1167,14 @@ def test():
     w.report([0x9F, 36 + 8, 90], 50.4); assert mm_p.log[-1] == ("note_on", 73, 90)   # C#5
     w.report([0xB0, PRESS, SHIFT], 50.5); w.report([0x9F, 36 + 3, 90], 50.6)
     assert mm_p.log[-1] == ("select_track", 3) and w.track_of["MM"] == 3          # SHIFT+pad 4
-    w.report([0xB0, PRESS, STEP0 + 5], 51.0); w.report([0x9F, 36 + 0, 90], 51.1)
-    assert mm_p.log[-1] == ("pitch", 5, 72) and not w.holds                      # step 6 = C5
-    w.report([0xB0, PRESS, STEP0 + 7], 51.12); w.tick(51.7)
-    assert mm_p.log[-1] == ("tap", 7)                                            # tapped...
-    w.report([0x9F, 36 + 0, 90], 52.5); assert mm_p.log[-1] == ("pitch", 7, 72)   # ...pad late
-    w.report([0x9F, 36 + 0, 90], 54.0); assert mm_p.log[-1] == ("note_on", 72, 90)  # live again
+    w.report([0xB0, PRESS, STEP0 + 5], 51.0); w.report([0xB0, KNOB0 + 4, 64], 51.05)
+    w.report([0xB0, KNOB0 + 4, 72], 51.1)                                        # hold step 6
+    assert mm_p.log[-2:] == [("hold", 5), ("press", "btRight")] and w.lock == 5  # + RIGHT
+    w.report([0xB0, KNOB0 + 5, 64], 51.12); w.report([0xB0, KNOB0 + 5, 56], 51.15)
+    assert mm_p.log[-1] == ("press", "btDown") and ("tap", 5) not in mm_p.log     # same hold
+    w.report([0x9F, 36 + 0, 90], 51.16); assert mm_p.log[-1] == ("note_on", 72, 90)  # pads: live
+    w.report([0xB0, PRESS, STEP0 + 9], 51.18); assert mm_p.log[-1] == ("release",)
+    w.holds.clear()
     w.report([0xB0, PRESS, MM_MUTE], 51.2); assert mm_p.log[-1] == ("mute_window", True)
     w.md["colours"] = ["red"] * 6 + [None] * 10
     assert w.colors(0, 16, 3, 51.21)[:7] == [RED] * 6 + [OFF]                    # no playhead

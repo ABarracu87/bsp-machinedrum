@@ -23,7 +23,6 @@ MENU_GAP = 0.3                 # s between MD menu presses (0.12 dropped one, 20
 LCD_BOX = (475, 158.75, 285, 155)   # lcdArea x, y, w, h on the screenshot the values below come from
 FOCUS_ROW = (245, 555, 700)    # scale-setup underline row on the screenshot: y, x0, x1
 FOCUS_FIELDS = (("steps", 610), ("total", 670), ("mult", 999))   # solid-line centre < edge
-PITCH_HOLD = 0.8               # s a trig stays held for MM pitch entry (mini-keyboard delay)
 HOLD_TIMEOUT = 10.0            # never keep Shift down longer than this
 WHEEL = 0.125                  # one BSP detent ~ one encoder step (plugin accelerates)
 
@@ -331,21 +330,6 @@ class Panel:
 
     def note_off(self, note):
         self.mcp.tool("send_midi", status=0x80 | self.prof["ch"], data1=note, data2=0)
-
-    def pitch(self, step, note):
-        """MM grid record: hold the trig, play the key, release = the step's pitch (manual:
-        hold [TRIG] + keyboard key). An empty step gets a trig with that pitch."""
-        if not self.hold(step):
-            return False
-        t0 = time.time()
-        self.note_on(note, 100)
-        time.sleep(0.05)
-        self.note_off(note)
-        # keep holding until the mini-keyboard is up: a quicker release counts as a tap and
-        # removes an existing trig (manual; live 2026-10-21: only empty steps worked)
-        time.sleep(max(0.0, PITCH_HOLD - (time.time() - t0)))
-        self.release()
-        return True
 
     def note(self, note, velocity):
         """Play a track through the plugin's MCP server (channel = MD base channel)."""

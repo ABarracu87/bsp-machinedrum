@@ -1,5 +1,17 @@
 """Tiny client for the Gearmulator plugin MCP server (localhost)."""
-import json, urllib.error, urllib.request
+import json, threading, time, urllib.error, urllib.request
+
+ACTIONS = {"click_element", "mouse_wheel", "send_midi"}   # what changes the plugins
+ACTION_GAP = 0.025                  # hard limit, both plugins together: <= 40 actions/s, no bursts
+_last, _lock = [0.0], threading.Lock()   # (user, 2026-11-01); over it an action waits, never dropped
+
+
+def _limit():
+    with _lock:
+        slot = max(time.time(), _last[0] + ACTION_GAP)   # the slot, not the late wake-up:
+        time.sleep(max(0.0, slot - time.time()))         # sleep overshoot must not slow it
+        _last[0] = slot
+
 
 class Mcp:
     def __init__(self, port=13710, resolve=None):
@@ -32,6 +44,8 @@ class Mcp:
             return json.loads(r.read() or b"null")
 
     def tool(self, _tool, **args):
+        if _tool in ACTIONS:
+            _limit()
         res = self.rpc("tools/call", {"name": _tool, "arguments": args})
         if res and "error" in res:
             raise RuntimeError(res["error"])

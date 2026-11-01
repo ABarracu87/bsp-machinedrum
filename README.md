@@ -103,7 +103,8 @@ The playhead is white.
 | Knob 16 | track up / down |
 | Pads | one-octave keyboard: bottom row C D E F G A B C, top row C# D# · F# G# A#; a held pad is dark |
 | Top-row pads 7 / 8 | octave down / up |
-| Step, then a pad (within 0.5 s) | that trig's note |
+| Hold a step + turn knob 5 / 6 | that trig's note: LEFT / RIGHT and DOWN / UP on the mini keyboard (one key per click; released like a p-lock) |
+| Knobs 5 / 6 (no step held) | arrow keys LEFT / RIGHT, DOWN / UP |
 | SHIFT, then pads 1–6 | select track 1–6 |
 | Step lights | red = note trig, yellow = note off, green = trigless (as the MM shows them) |
 | Mute window | steps 1–6 = MM tracks, steps 9–14 = MIDI sequencer tracks |
@@ -123,6 +124,9 @@ The playhead is white.
   from the plugin's UI (step LEDs, page dots, track LEDs) in one query per frame. MM notes go
   in as MCP MIDI messages. MD pattern length is set through Scale Setup, checking the cursor
   on a screenshot of the MD's LCD before any UP/DOWN.
+- **Hard limits**: plugin actions (clicks, wheel, notes) at most 40 per second, evenly
+  spaced; a burst waits, knob turns queued meanwhile are merged, nothing is dropped.
+  Everything sent to the BSP except the clock: at most 8 per 100 ms, 6 ms apart.
 - **Freeze alarm**: the app asks the BSP for a setting every 5 s and after each knob reset.
   No answer: a red warning, the clock stops, and the app reconnects after a power cycle.
   An answer saying report mode is off: the app switches it back on.
